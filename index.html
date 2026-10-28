@@ -1,0 +1,845 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<script>
+/* 1.33：iPad 不延伸到狀態列底下（viewport-fit=cover 會讓 iPadOS 把畫面延伸到狀態列下並蓋一層霧化，標題列被模糊）；
+   拿掉之後畫面從狀態列下方開始、狀態列是實心底色，和 iPhone 一致。這個設定每次打開都會讀，不用重新加入主畫面 */
+(function () {
+  var ua = navigator.userAgent;
+  if (/iPad/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)) {
+    var m = document.querySelector('meta[name=viewport]');
+    if (m) m.setAttribute('content', m.getAttribute('content').replace(/,\s*viewport-fit=cover/, ''));
+    document.documentElement.classList.add('ipad');
+  }
+})();
+</script>
+<title>伍線譜樂譜掃描｜精確的攜帶式 PDF 掃描神器</title>
+<meta name="description" content="用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="伍線譜樂譜掃描">
+<meta property="og:title" content="伍線譜樂譜掃描｜精確的攜帶式 PDF 掃描神器">
+<meta property="og:description" content="用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。">
+<meta property="og:url" content="https://andywu1101.github.io/scanner/">
+<meta property="og:image" content="https://andywu1101.github.io/scanner/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:locale" content="zh_TW">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="伍線譜樂譜掃描｜精確的攜帶式 PDF 掃描神器">
+<meta name="twitter:description" content="用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。">
+<meta name="twitter:image" content="https://andywu1101.github.io/scanner/og-image.png">
+<meta name="theme-color" content="#FFFCF8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="伍線譜掃描">
+<script>
+/* Android／桌機 Chromium 的安裝事件可能很早就觸發，要放在最前面接（事件物件只能用一次） */
+window.__a2hsPrompt = null;
+window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__a2hsPrompt = e; });
+window.addEventListener('appinstalled', function () { window.__a2hsPrompt = null; });
+</script>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<style>
+:root{
+  --bg:#F6EFE6; --surface:#FFFCF8; --surface2:#EFE4D7; --line:#E3D5C4;
+  --cocoa:#6B4632; --cocoa-d:#4A2F22; --cocoa-l:#8A604A; --caramel:#C9935F; --cream:#FAF3E9;
+  --sage:#8FB38A; --sage-d:#5E8A59; --text:#3A281E; --muted:#8C7564; --danger:#B4533F;
+  --cam:#1C130E;
+  --st:env(safe-area-inset-top,0px); --sb:env(safe-area-inset-bottom,0px);
+  --font:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--font);overscroll-behavior:none}
+body{overflow:hidden;-webkit-user-select:none;user-select:none}
+/* iOS 26 主畫面 App：網頁比畫面矮時，iOS 會少畫狀態列高度的底部（WebKit 301108）。
+   讓網頁本身比畫面高一點，iOS 就會畫滿整個螢幕（frappe-ui 的做法） */
+@media (display-mode: standalone){
+  html{min-height:min(100lvh, calc(100% + env(safe-area-inset-top)))}
+}
+button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer}
+svg{display:block}
+.screen{position:fixed;inset:0;display:none;flex-direction:column;background:var(--bg)}
+.screen.active{display:flex}
+
+/* 頂列 */
+.bar{display:flex;align-items:center;gap:8px;padding:calc(var(--st) + 10px) 12px 10px;background:var(--surface);color:var(--cocoa);border-bottom:1px solid var(--line);min-height:56px;flex:none}
+.bar h1{font-size:19px;margin:0 0 0 4px;font-weight:700;letter-spacing:.06em;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar .title-btn{flex:1;text-align:left;font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:6px 4px}
+.ibtn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;flex:none}
+.ibtn:active{background:rgba(107,70,50,.1)}
+.ibtn svg{width:24px;height:24px}
+.tbtn{padding:8px 12px;border-radius:10px;font-weight:600;font-size:15px}
+.tbtn:active{background:rgba(107,70,50,.1)}
+.tbtn.solid{background:var(--cocoa);color:var(--cream)}
+/* 相機、裁切、連拍這些深色畫面的頂列 */
+#crop .bar,#burst .bar{color:var(--cream);border-bottom:0}
+#crop .bar .tbtn.solid,#burst .bar .tbtn.solid{background:var(--cream);color:var(--cocoa)}
+#crop .bar .ibtn:active,#crop .bar .tbtn:active,#burst .bar .tbtn:active{background:rgba(255,255,255,.14)}
+#cropCurve.on{color:var(--caramel)}
+
+/* 首頁 */
+.scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:14px 14px 20px}
+.doclist{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:14px}
+.doc{background:var(--surface);border-radius:14px;overflow:hidden;box-shadow:0 1px 0 var(--line),0 4px 14px rgba(74,47,34,.07);text-align:left;display:flex;flex-direction:column}
+.doc:active{transform:scale(.98)}
+.doc .th{aspect-ratio:3/4;background:var(--surface2);display:grid;place-items:center;overflow:hidden;position:relative}
+.doc .th img{width:100%;height:100%;object-fit:cover;object-position:top}
+.doc .th .n{position:absolute;right:8px;bottom:8px;background:rgba(58,40,30,.78);color:#fff;font-size:12px;padding:2px 8px;border-radius:20px}
+.doc .meta{padding:9px 11px 11px}
+.doc .t{font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.doc .d{font-size:12px;color:var(--muted);margin-top:3px}
+.empty{min-height:62vh;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:var(--muted);height:100%;gap:14px;padding:30px}
+.empty svg{width:96px;height:96px;opacity:.85}
+.empty b{color:var(--cocoa);font-size:17px}
+
+.actions{flex:none;display:flex;align-items:center;justify-content:space-around;padding:12px 20px calc(var(--sb) + 14px);background:var(--surface);border-top:1px solid var(--line)}
+.act{display:flex;flex-direction:column;align-items:center;gap:5px;font-size:12.5px;color:var(--cocoa);min-width:70px}
+.act .c{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;background:var(--surface2)}
+.act .c svg{width:26px;height:26px}
+.act.main .c{width:70px;height:70px;background:var(--cocoa);color:var(--cream);box-shadow:0 6px 18px rgba(107,70,50,.35)}
+.act.main .c svg{width:32px;height:32px}
+.act:active .c{filter:brightness(.92)}
+
+/* 即時掃描 */
+#live{background:var(--cam);color:#fff}
+#live .stage{position:relative;flex:1;overflow:hidden}
+#video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#000}
+#overlay{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+#live .top{position:absolute;left:0;right:0;top:0;padding:calc(var(--st) + 8px) 10px 8px;display:flex;align-items:center;gap:6px;background:linear-gradient(rgba(0,0,0,.55),transparent);z-index:2}
+#live .top .sp{flex:1}
+.pill{background:rgba(28,19,14,.6);border-radius:20px;padding:7px 13px;font-size:13.5px;font-weight:600;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.pill.on{background:var(--sage-d)}
+#hint{position:absolute;left:50%;top:calc(var(--st) + 66px);transform:translateX(-50%);z-index:2;white-space:nowrap;pointer-events:none;transition:background .2s}
+#resChip{position:absolute;left:12px;bottom:12px;font-size:11px;opacity:.75;z-index:2;font-weight:500;padding:4px 9px}
+#live .bottom{flex:none;display:flex;align-items:center;justify-content:space-between;padding:16px 22px calc(var(--sb) + 18px);background:var(--cam)}
+#liveThumb{width:56px;height:56px;border-radius:10px;overflow:hidden;background:#3a2b22;position:relative;border:2px solid rgba(255,255,255,.6);visibility:hidden}
+#liveThumb img{width:100%;height:100%;object-fit:cover}
+#liveThumb span{position:absolute;right:-1px;top:-1px;background:var(--caramel);color:#fff;font-size:12px;font-weight:700;min-width:20px;height:20px;border-radius:0 0 0 8px;display:grid;place-items:center;padding:0 4px}
+#shutter{width:76px;height:76px;border-radius:50%;border:4px solid #fff;display:grid;place-items:center;position:relative}
+#shutter::after{content:"";width:60px;height:60px;border-radius:50%;background:#fff;transition:transform .1s}
+#shutter:active::after{transform:scale(.88)}
+#shutter svg{position:absolute;inset:-4px;width:76px;height:76px;transform:rotate(-90deg)}
+#liveDone{min-width:56px;font-weight:700;color:var(--caramel);font-size:16px;text-align:right}
+#flash{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none;z-index:3}
+#flash.go{animation:fl .35s ease-out}
+@keyframes fl{0%{opacity:.85}100%{opacity:0}}
+
+/* 裁切 */
+#crop{background:var(--cam);color:#fff}
+#crop .bar{background:var(--cam)}
+#cropStage{position:relative;flex:1;overflow:hidden;touch-action:none}
+#cropImg{position:absolute;pointer-events:none}
+#cropSvg{position:absolute;overflow:visible}
+#cropHandles{position:absolute;overflow:visible;pointer-events:none;z-index:3}
+/* 1.12 裁切即時成品預覽（子母畫面） */
+#pip{position:absolute;left:10px;top:10px;width:50%;max-width:320px;border-radius:12px;overflow:hidden;background:#fff;box-shadow:0 6px 20px rgba(0,0,0,.45);border:2px solid rgba(255,255,255,.85);z-index:2;display:none;transition:left .22s ease,top .22s ease,opacity .25s;touch-action:none;opacity:0}
+#pip.show{display:block}
+#pip.vis{opacity:1}
+#pipCv,#pipFullCv{display:block;width:100%;height:auto;background:#fff}
+.pip-gl{position:absolute;inset:0;pointer-events:none;background:repeating-linear-gradient(to bottom,transparent 0,transparent calc(12.5% - 1px),rgba(201,147,95,.55) calc(12.5% - 1px),rgba(201,147,95,.55) 12.5%)}
+.pip-lb{position:absolute;left:5px;top:5px;font-size:10.5px;font-weight:700;color:#fff;background:rgba(28,19,14,.6);padding:2px 7px;border-radius:999px;pointer-events:none}
+#pipFull{position:absolute;inset:0;background:#1C130E;z-index:6;display:none;align-items:center;justify-content:center;padding:52px 14px 14px}
+#pipFull.show{display:flex}
+#pipFull .wrap{position:relative;max-width:100%;max-height:100%}
+#pipFull canvas{max-height:calc(100vh - 220px);width:auto;max-width:100%}
+#pipFull .pip-gl{background:repeating-linear-gradient(to bottom,transparent 0,transparent calc(6.25% - 1px),rgba(201,147,95,.5) calc(6.25% - 1px),rgba(201,147,95,.5) 6.25%)}
+#pipFull .tip{position:absolute;top:12px;left:50%;transform:translateX(-50%);color:#fff;font-size:13px;background:rgba(255,255,255,.15);padding:6px 14px;border-radius:999px;white-space:nowrap;pointer-events:none}
+#loupe{position:absolute;width:132px;height:132px;border-radius:50%;border:3px solid #fff;box-shadow:0 4px 18px rgba(0,0,0,.5);display:none;pointer-events:none;background:#000;z-index:3}
+.tools{flex:none;display:flex;justify-content:space-around;padding:10px 8px calc(var(--sb) + 12px)}
+.tool{display:flex;flex-direction:column;align-items:center;gap:4px;font-size:12px;min-width:64px;padding:6px 4px;border-radius:12px;opacity:.95}
+.tool svg{width:25px;height:25px}
+.tool:active{background:rgba(255,255,255,.12)}
+.tool[disabled]{opacity:.35;pointer-events:none}
+
+/* 文件頁 */
+.pagegrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:14px}
+.pg{position:relative;background:var(--surface);border-radius:10px;overflow:hidden;box-shadow:0 1px 0 var(--line),0 3px 12px rgba(74,47,34,.08);aspect-ratio:3/4;display:grid;place-items:center}
+.pg img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#fff} /* 1.32：絕對定位，比 3:4 瘦長的頁面才不會撐出格子被切掉 */
+.pg .no{position:absolute;left:7px;top:7px;background:var(--cocoa);color:var(--cream);font-size:12px;font-weight:700;border-radius:20px;min-width:22px;height:22px;display:grid;place-items:center;padding:0 6px}
+.pg .wait{position:absolute;inset:0;display:grid;place-items:center;background:rgba(246,239,230,.7)}
+.pg.add{background:transparent;border:2px dashed var(--line);box-shadow:none;color:var(--cocoa-l);font-size:13px;gap:6px;align-content:center}
+.pg.add svg{width:30px;height:30px;margin:0 auto}
+.dock{flex:none;display:flex;justify-content:space-around;padding:8px 8px calc(var(--sb) + 10px);background:var(--surface);border-top:1px solid var(--line);color:var(--cocoa)}
+.dock .tool{color:var(--cocoa)}
+.dock .tool:active{background:var(--surface2)}
+
+/* 單頁檢視 */
+#page{background:#E9DFD3}
+#viewStage{position:relative;flex:1;overflow:hidden;touch-action:none}
+#viewImg{position:absolute;left:0;top:0;transform-origin:0 0;box-shadow:0 4px 22px rgba(58,40,30,.25);background:#fff;max-width:none;max-height:none}
+.navarrow{position:absolute;top:50%;transform:translateY(-50%);width:40px;height:56px;display:grid;place-items:center;color:var(--cocoa);background:rgba(255,252,248,.75);border-radius:12px;z-index:2}
+.navarrow svg{width:22px;height:22px}
+#prevBtn{left:6px}#nextBtn{right:6px}
+.modes{flex:none;display:flex;gap:8px;justify-content:center;padding:10px 10px 4px;background:var(--surface);flex-wrap:wrap}
+.chip{padding:8px 15px;border-radius:20px;background:var(--surface2);color:var(--cocoa);font-size:14px;font-weight:600}
+.chip.on{background:var(--cocoa);color:var(--cream)}
+#viewBusy{position:absolute;right:12px;top:12px;display:none;z-index:3}
+
+/* 底部選單 */
+#sheetWrap{position:fixed;inset:0;background:rgba(40,26,18,.42);display:none;z-index:20;align-items:flex-end}
+#sheetWrap.show{display:flex}
+#sheet{width:100%;background:var(--surface);border-radius:20px 20px 0 0;padding:8px 16px calc(var(--sb) + 16px);max-height:85vh;overflow-y:auto;animation:up .22s ease-out}
+@keyframes up{from{transform:translateY(40px);opacity:.4}}
+#sheet .grab{width:40px;height:5px;border-radius:3px;background:var(--line);margin:4px auto 10px}
+#sheet h3{margin:4px 4px 12px;font-size:17px;color:var(--cocoa-d)}
+.srow{display:flex;align-items:center;gap:12px;width:100%;padding:13px 12px;border-radius:12px;text-align:left;font-size:16px}
+.srow:active{background:var(--surface2)}
+.srow svg{width:24px;height:24px;color:var(--cocoa);flex:none}
+.srow .sub{font-size:12.5px;color:var(--muted);display:block;margin-top:2px}
+.srow.danger,.srow.danger svg{color:var(--danger)}
+.seg{display:flex;background:var(--surface2);border-radius:12px;padding:3px;gap:3px;margin:0 0 14px}
+.seg button{flex:1;padding:9px 4px;border-radius:9px;font-size:14px;font-weight:600;color:var(--cocoa)}
+.seg button.on{background:var(--surface);box-shadow:0 1px 4px rgba(74,47,34,.15)}
+.lbl{font-size:13px;color:var(--muted);margin:6px 4px 7px}
+.switch{display:flex;align-items:center;justify-content:space-between;padding:12px 4px;font-size:15.5px;border-top:1px solid var(--line)}
+.switch small{display:block;color:var(--muted);font-size:12.5px;margin-top:2px}
+.tg{width:50px;height:30px;border-radius:15px;background:var(--line);position:relative;flex:none;transition:background .2s}
+.tg::after{content:"";position:absolute;left:3px;top:3px;width:24px;height:24px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:left .2s}
+.tg.on{background:var(--sage-d)}
+.tg.on::after{left:23px}
+.bigbtn{display:block;width:100%;padding:14px;border-radius:14px;background:var(--cocoa);color:var(--cream);font-size:16px;font-weight:700;margin-top:10px}
+.bigbtn.alt{background:var(--surface2);color:var(--cocoa)}
+.note{font-size:12.5px;color:var(--muted);line-height:1.6;margin:12px 4px 0}
+
+/* 忙碌、提示 */
+#busy{position:fixed;inset:0;background:rgba(40,26,18,.5);display:none;place-items:center;z-index:30}
+#busy.show{display:grid}
+#busy .box{background:var(--surface);border-radius:16px;padding:22px 26px;display:flex;flex-direction:column;align-items:center;gap:14px;min-width:170px;color:var(--cocoa-d);font-weight:600;font-size:15px}
+.spin{width:34px;height:34px;border-radius:50%;border:3.5px solid var(--surface2);border-top-color:var(--cocoa);animation:sp .8s linear infinite}
+.spin.sm{width:22px;height:22px;border-width:3px}
+@keyframes sp{to{transform:rotate(360deg)}}
+#toast{position:fixed;left:50%;top:calc(var(--st) + 68px);transform:translateX(-50%) translateY(-12px);background:rgba(58,40,30,.92);color:#fff;padding:10px 18px;border-radius:22px;font-size:14px;opacity:0;transition:all .25s;z-index:40;pointer-events:none;max-width:86vw;text-align:center}
+#toast.show{opacity:1;transform:translateX(-50%)}
+input[type=file]{display:none}
+
+/* 細部調整 */
+.chip.adj{display:flex;align-items:center;gap:5px;background:var(--surface);box-shadow:inset 0 0 0 1.5px var(--line)}
+.chip.adj svg{width:16px;height:16px}
+#adjWrap{position:absolute;left:0;top:0;transform-origin:0 0;display:none;background:#fff;box-shadow:0 4px 22px rgba(58,40,30,.25);overflow:hidden}
+#page.adjusting #adjWrap{display:block}
+#adjWrap canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:none}
+#cmpTag{position:absolute;left:50%;top:12px;transform:translateX(-50%);display:none;z-index:4;color:#fff}
+#adjPanel{display:none;flex:none;background:var(--surface);padding:6px 14px calc(var(--sb) + 10px);border-top:1px solid var(--line)}
+#page.adjusting #adjPanel{display:block}
+#page.adjusting .modes,#page.adjusting .dock,#page.adjusting .navarrow,#page.adjusting #viewImg{display:none}
+.adjhead{display:flex;align-items:center;gap:6px}
+.adjhead b{flex:1;font-size:15.5px;color:var(--cocoa-d)}
+.adjhead .tbtn{color:var(--cocoa);padding:7px 10px;font-size:14px}
+.adjhead .tbtn.solid{background:var(--cocoa);color:var(--cream)}
+.adjtabs{display:flex;gap:6px;overflow-x:auto;padding:6px 0 4px;scrollbar-width:none}
+.adjtabs::-webkit-scrollbar{display:none}
+.atab{flex:none;padding:7px 13px;border-radius:18px;background:var(--surface2);color:var(--cocoa);font-size:14px;font-weight:600;position:relative}
+.atab.on{background:var(--cocoa);color:var(--cream)}
+.atab.chg::after{content:"";position:absolute;right:5px;top:5px;width:6px;height:6px;border-radius:50%;background:var(--caramel)}
+.adjone{padding:2px 16px 0} /* 1.28：拉桿往內收，離螢幕邊緣約 30px，避免誤觸返回手勢 */
+.adjval{display:flex;align-items:center;font-size:12px;color:var(--muted)}
+.adjval output{flex:1;text-align:center;font-size:14.5px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+.adjval output.chg{color:var(--cocoa)}
+.adjval span{min-width:28px}
+.adjval span:last-child{text-align:right}
+.adjnote{font-size:11.5px;color:var(--muted);text-align:center;margin-top:2px}
+#adjRange{-webkit-appearance:none;appearance:none;width:100%;height:36px;background:transparent;margin:0;
+  background-image:linear-gradient(var(--caramel),var(--caramel)),linear-gradient(var(--line),var(--line));
+  background-size:2px 14px,100% 4px;background-position:calc(var(--def) - (var(--def) / 100% * 28px) + 13px) center,0 center;background-repeat:no-repeat}
+#adjRange::-webkit-slider-thumb{-webkit-appearance:none;width:28px;height:28px;border-radius:50%;background:var(--cocoa);border:3px solid var(--cream);box-shadow:0 1px 5px rgba(58,40,30,.35)}
+#adjRange::-moz-range-thumb{width:24px;height:24px;border-radius:50%;background:var(--cocoa);border:3px solid var(--cream)}
+.pg img{-webkit-touch-callout:none;pointer-events:none}
+.pg{-webkit-touch-callout:none;touch-action:manipulation}
+.pg-ghost{opacity:.35}
+.pg-chosen .card{box-shadow:0 0 0 3px var(--caramel),0 10px 26px rgba(74,47,34,.3)!important}
+.pg-drag{transform:scale(1.04);opacity:.95}
+.fname{display:flex;align-items:center;gap:8px;background:var(--surface2);border-radius:12px;padding:4px 12px 4px 4px;margin-bottom:14px}
+.fname input{flex:1;min-width:0;border:0;background:var(--surface);border-radius:9px;padding:11px 12px;font:inherit;font-size:16px;color:var(--text);outline:none;-webkit-user-select:text;user-select:text}
+.fname input:focus{box-shadow:0 0 0 2px var(--caramel)}
+.fname span{color:var(--muted);font-size:14px;white-space:nowrap}
+/* 首頁最近一份 */
+.sec{font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.08em;margin:4px 4px 10px}
+.recent{background:var(--surface);border-radius:18px;padding:14px 14px 16px;box-shadow:0 1px 0 var(--line),0 6px 20px rgba(74,47,34,.08)}
+.rname{display:flex;align-items:center;gap:8px;background:var(--surface2);border-radius:12px;padding:0 12px;color:var(--cocoa-l)}
+.rname svg{width:18px;height:18px;flex:none}
+.rname input{flex:1;min-width:0;border:0;background:transparent;font:inherit;font-size:17px;font-weight:700;color:var(--text);padding:12px 0;outline:none;-webkit-user-select:text;user-select:text}
+.rname:focus-within{box-shadow:0 0 0 2px var(--caramel)}
+.rmeta{font-size:12.5px;color:var(--muted);margin:8px 4px 10px}
+.strip{display:flex;gap:10px;overflow-x:auto;padding:2px 2px 10px;scroll-snap-type:x proximity;-webkit-overflow-scrolling:touch}
+.sth{flex:none;width:96px;aspect-ratio:3/4;border-radius:8px;overflow:hidden;background:#fff;position:relative;box-shadow:0 0 0 1px var(--line);scroll-snap-align:start}
+.sth img{width:100%;height:100%;object-fit:contain;pointer-events:none;-webkit-touch-callout:none}
+.sth span{position:absolute;left:5px;top:5px;background:var(--cocoa);color:var(--cream);font-size:11px;font-weight:700;border-radius:10px;min-width:19px;height:19px;display:grid;place-items:center;padding:0 5px}
+.sth .spin{position:absolute;right:6px;bottom:6px}
+.rbtns{display:flex;gap:10px}
+.rbtns .bigbtn{margin-top:6px;padding:12px}
+.allbtn{display:flex;align-items:center;justify-content:space-between;width:100%;margin-top:14px;padding:16px;border-radius:16px;background:var(--surface);color:var(--cocoa-d);font-size:16px;font-weight:700;box-shadow:0 1px 0 var(--line),0 4px 14px rgba(74,47,34,.06)}
+.allbtn > span:first-child{display:flex;align-items:center;gap:10px}
+.allbtn svg{width:24px;height:24px;color:var(--cocoa)}
+.allbtn .cnt{color:var(--muted);font-weight:600;font-size:14px}
+/* 選取模式 */
+.doc .ck,.pg .ck{display:none}
+.selecting .doc .ck{display:grid;position:absolute;right:8px;top:8px;width:26px;height:26px;border-radius:50%;border:2px solid #fff;background:rgba(58,40,30,.35);color:#fff;font-size:13px;font-weight:700;place-items:center;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.selecting .doc.sel .ck{background:var(--cocoa);border-color:var(--cream)}
+.selecting .doc.sel{box-shadow:0 0 0 3px var(--cocoa)}
+.selecting .pg .card::after{content:"";position:absolute;right:7px;top:7px;width:22px;height:22px;border-radius:50%;border:2px solid #fff;background:rgba(58,40,30,.3);box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.selecting .pg.sel .card::after{background:var(--cocoa) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23fff' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 12l4 4 8-9'/%3E%3C/svg%3E") center/14px no-repeat;border-color:var(--cream)}
+.selecting .pg.sel .card{box-shadow:0 0 0 3px var(--cocoa)}
+.dock .tool.danger{color:var(--danger)}
+.dock .tool[disabled]{opacity:.35}
+.selcount{justify-content:center;font-size:14px;font-weight:700;color:var(--cocoa-d)!important}
+.hint-line{font-size:12.5px;color:var(--muted);text-align:center;padding:2px 0 10px}
+
+/* 高畫質連拍 */
+#burst{background:var(--cam);color:#fff}
+#burst .bar{background:var(--cam)}
+#burstStage{flex:1;display:flex;align-items:center;justify-content:center;padding:18px;overflow:hidden;position:relative}
+#burstImg{max-width:100%;max-height:100%;border-radius:8px;box-shadow:0 8px 30px rgba(0,0,0,.5);visibility:hidden}
+#burstCount{position:absolute;top:14px;left:50%;transform:translateX(-50%)}
+#burst .controls{flex:none;padding:6px 20px calc(var(--sb) + 18px)}
+#burst .row{display:flex;align-items:center;justify-content:space-between;margin-top:12px}
+#burstNext{width:84px;height:84px;border-radius:50%;background:var(--cream);color:var(--cocoa);display:grid;place-items:center;box-shadow:0 6px 20px rgba(0,0,0,.35)}
+#burstNext svg{width:36px;height:36px}
+#burstNext:active{transform:scale(.94)}
+#burst .side{min-width:78px;display:flex;flex-direction:column;align-items:center;gap:4px;font-size:12.5px}
+#burst .side svg{width:26px;height:26px}
+#burst .side[disabled]{opacity:.35}
+#burst .opt{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,.07);border-radius:12px;padding:10px 14px;font-size:14.5px}
+
+/* ===== 封面（v1.8，比照音樂聽力練習 App） ===== */
+#cover{background:var(--bg)}
+#cover .cv-scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;display:flex;flex-direction:column}
+.cv{flex:1;min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;position:relative;overflow:hidden;padding:calc(var(--st) + 28px) 20px calc(var(--sb) + 28px)}
+.cv-notes{position:absolute;inset:0;pointer-events:none;overflow:hidden}
+.cv-note{position:absolute;color:var(--cocoa);opacity:.10;line-height:1;font-family:"Times New Roman",serif;user-select:none}
+.cv-card{position:relative;z-index:1;max-width:540px;width:100%}
+.cv-art{display:block;margin:0 auto 25px}
+.cv-title{font-size:34px;font-weight:700;margin:0 0 6px;letter-spacing:.04em;color:var(--text)}
+.cv-sub{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;letter-spacing:.22em;color:var(--muted);margin-bottom:24px}
+.cv-msg{font-size:15px;line-height:1.95;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px;margin:0 auto 26px;box-shadow:0 4px 16px rgba(74,47,34,.06)}
+.cv-start{font-weight:700;font-size:18px;padding:16px 44px;border-radius:999px;background:var(--cocoa);color:#fff;box-shadow:0 6px 20px rgba(74,47,34,.28);transition:transform .15s,filter .15s;touch-action:manipulation}
+.cv-start:active{filter:brightness(1.12);transform:translateY(-2px)}
+.cv-foot{margin-top:20px;font-size:13.5px;color:var(--muted)}
+.cv-author{margin-top:14px;font-size:13.5px;color:var(--muted);border-bottom:1px dashed var(--caramel);padding-bottom:1px}
+.cv-donate{margin-top:12px;display:inline-flex;align-items:center;gap:7px;font-weight:700;font-size:14.5px;padding:11px 26px;border-radius:999px;background:var(--danger);color:#fff;box-shadow:0 4px 14px rgba(180,83,63,.28);touch-action:manipulation}
+.cv-donate:active{filter:brightness(1.08);transform:translateY(-1px)}
+@media (max-height:640px){.cv-title{font-size:30px}.cv-msg{font-size:14px;padding:14px}.cv-art{width:60px;height:80px;margin-bottom:18px}}
+/* 贊助／作者彈窗 */
+.dmodal{position:fixed;inset:0;z-index:25;background:rgba(40,26,18,.55);padding:calc(var(--st) + 20px) 16px calc(var(--sb) + 20px);overflow-y:auto;-webkit-overflow-scrolling:touch;display:none}
+.dmodal.open{display:flex;align-items:flex-start;justify-content:center}
+.dbox{background:var(--bg);border:1px solid var(--line);border-radius:16px;margin:auto;max-width:400px;width:100%;padding:28px 22px 22px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,.28);-webkit-user-select:text;user-select:text}
+.dbox .dico{font-size:38px;line-height:1;color:var(--danger)}
+.dbox h3{font-size:22px;font-weight:700;margin:10px 0 8px;color:var(--text)}
+.dbox p{font-size:15px;color:var(--muted);line-height:1.8;margin:0 0 16px}
+.dlinks{display:flex;flex-direction:column;gap:10px;margin:6px 0 14px}
+.ditem{display:flex;align-items:center;justify-content:center;gap:9px;font-weight:700;font-size:15.5px;padding:13px 18px;border-radius:14px;text-decoration:none;border:1px solid var(--line);background:var(--surface);color:var(--text);touch-action:manipulation}
+.ditem:active{border-color:var(--cocoa);background:var(--surface2)}
+.ditem .ico{display:inline-flex;align-items:center}
+.jko-card{display:block;text-decoration:none;border:1px solid var(--line);border-radius:16px;overflow:hidden;background:#fff}
+.jko-card img{display:block;width:100%;max-width:270px;margin:14px auto 6px}
+.jko-label{display:block;font-weight:700;font-size:15px;color:#fff;background:var(--cocoa);padding:11px}
+.jko-acct{display:flex;align-items:center;justify-content:center;gap:8px;font-size:14px;color:var(--muted);margin:10px 0 2px}
+.jko-acct b,.bank-row b{color:var(--text);font-family:ui-monospace,Menlo,Consolas,monospace;letter-spacing:.03em}
+.copy-btn{font-size:13px;font-weight:700;color:var(--cocoa);background:var(--surface2);border:1px solid var(--line);border-radius:999px;padding:3px 12px;touch-action:manipulation}
+.copy-btn:active{background:var(--cocoa);color:#fff}
+.pay-note{font-size:14px;color:var(--text)!important;line-height:1.8;margin:10px 2px 6px!important}
+.form-link{display:block;font-size:14px;font-weight:700;color:var(--cocoa);background:var(--surface2);border:1px solid var(--line);border-radius:12px;padding:11px 12px;text-decoration:none;margin-top:4px}
+.bank-row{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font-size:15.5px}
+.bank-row .bk{font-size:13px;color:var(--muted);flex-shrink:0;width:34px;text-align:left}
+.bank-row b{flex:1;text-align:left}
+.sponsor-list{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;padding:14px 10px;border:1px dashed var(--line);border-radius:12px}
+.sponsor-list span{display:inline-flex;align-items:center;min-height:34px;line-height:1;font-size:15px;font-weight:600;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:0 14px}
+.line-inline{color:var(--danger);text-decoration:underline;text-underline-offset:3px;font-weight:600;white-space:nowrap}
+.d-dismiss{font-size:15.5px;color:var(--muted);text-decoration:underline;padding:6px 12px;touch-action:manipulation}
+.author-invite{font-size:14px!important;line-height:1.9!important;margin:2px 4px 14px!important}
+
+/* v1.9 拍攝中／拍好了 提示 */
+#freeze{position:absolute;inset:0;width:100%;height:100%;display:none;z-index:1;pointer-events:none}
+#overlay{z-index:2}
+#shotBusy,#shotOk{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;pointer-events:none;display:none;flex-direction:column;align-items:center;gap:12px;color:#fff;text-shadow:0 1px 6px rgba(0,0,0,.6)}
+#shotBusy{background:rgba(28,19,14,.62);padding:20px 26px;border-radius:18px}
+#shotBusy b,#shotOk b{white-space:nowrap;font-size:19px;font-weight:700;letter-spacing:.04em}
+#shotBusy .spin{border-color:rgba(255,255,255,.3);border-top-color:#fff}
+#shotBusy.show{display:flex}
+#shotOk.show{display:flex;animation:okpop .75s ease-out forwards}
+#shotOk .ok-c{width:96px;height:96px;border-radius:50%;background:rgba(94,138,89,.92);display:grid;place-items:center;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+#shotOk .ok-c svg{width:58px;height:58px}
+@keyframes okpop{0%{opacity:0;transform:translate(-50%,-50%) scale(.6)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}25%{transform:translate(-50%,-50%) scale(1)}80%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(1)}}
+#liveThumb.bump{animation:bump .45s ease-out}
+@keyframes bump{0%{transform:scale(1)}35%{transform:scale(1.22)}100%{transform:scale(1)}}
+.sponsor-empty{font-size:15px;color:var(--muted);padding:6px 4px;line-height:1.7}
+/* 使用教學 */
+.help h4{font-size:15.5px;color:var(--cocoa-d);margin:16px 4px 6px}
+.help ul{margin:0;padding:0 4px 0 22px}
+.help li{font-size:14.5px;line-height:1.75;color:var(--text);margin:2px 0}
+.help .warn{background:#FBEDE6;border:1px solid #EBC3B5;border-radius:12px;padding:4px 10px 10px;margin-top:16px}
+.help .warn h4{color:var(--danger)}
+.help .close-help{display:block;width:100%;margin:18px 0 4px;padding:13px;border-radius:12px;background:var(--cocoa);color:#fff;font-weight:700;font-size:15.5px}
+
+/* 首頁頂列：左上回封面、標題置中（1.10） */
+.home-bar{position:relative}
+.home-bar h1{position:absolute;left:50%;transform:translateX(-50%);top:calc(var(--st) + 10px);bottom:10px;display:flex;align-items:center;justify-content:center;margin:0;flex:none;width:auto;max-width:52%;pointer-events:none}
+.home-bar .sp1{flex:1}
+.cvback{display:inline-flex;align-items:center;gap:2px;font-size:14px;font-weight:600;color:var(--cocoa);padding:7px 11px 7px 7px;border-radius:999px;background:var(--surface2);flex:none}
+.cvback svg{width:18px;height:18px}
+.cvback:active{filter:brightness(.94)}
+/* 首頁小額贊助（拍攝按鈕上方） */
+.home-donate{flex:none;display:flex;justify-content:center;padding:6px 0 10px}
+.home-donate button{font-size:13.5px;font-weight:700;color:#fff;background:var(--danger);padding:8px 18px;border-radius:999px;box-shadow:0 3px 10px rgba(180,83,63,.25)}
+.home-donate button:active{filter:brightness(1.08)}
+
+/* 1.11 統一調整／單頁獨立 */
+#page.adjusting.adj-doc .navarrow{display:grid}
+#page.adj-doc #pageDel{visibility:hidden}
+.pg .custom{position:absolute;right:5px;top:5px;width:22px;height:22px;border-radius:50%;background:var(--caramel);color:#fff;display:grid;place-items:center;box-shadow:0 1px 4px rgba(0,0,0,.25)}
+.pg .custom svg{width:13px;height:13px}
+
+/* 1.12 名稱輸入框的清除鈕 */
+.nclr{flex:none;width:26px;height:26px;border-radius:50%;display:none;place-items:center;color:var(--muted);margin-left:2px}
+.nclr.on{display:grid}
+.nclr svg{width:20px;height:20px}
+.fname .nclr{margin-left:-36px;margin-right:6px;position:relative;z-index:1}
+.fname input{padding-right:36px}
+
+/* 1.15 預設調整數值 */
+.defrow{padding:8px 4px 4px;border-top:1px solid var(--line)}
+.defrow .dh{display:flex;justify-content:space-between;font-size:15px;color:var(--text)}
+.defrow .dh b{color:var(--cocoa);font-variant-numeric:tabular-nums}
+.defrow .dl{display:flex;justify-content:space-between;font-size:11.5px;color:var(--muted);margin-top:-4px}
+.defrange{-webkit-appearance:none;appearance:none;width:100%;height:34px;background:transparent;margin:0;
+  background-image:linear-gradient(var(--caramel),var(--caramel)),linear-gradient(var(--line),var(--line));
+  background-size:2px 12px,100% 4px;background-position:calc(var(--def) - (var(--def) / 100% * 26px) + 12px) center,0 center;background-repeat:no-repeat}
+.defrange::-webkit-slider-thumb{-webkit-appearance:none;width:26px;height:26px;border-radius:50%;background:var(--cocoa);border:3px solid var(--cream);box-shadow:0 1px 5px rgba(58,40,30,.35)}
+.defrange::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:var(--cocoa);border:3px solid var(--cream)}
+
+/* 加入主畫面（1.17） */
+.cv-a2hs{margin:0 auto 14px;display:none;align-items:center;justify-content:center;gap:8px;font-weight:700;font-size:16px;padding:13px 22px;border-radius:999px;background:var(--surface);color:var(--cocoa-d);border:2px solid var(--cocoa);box-shadow:0 4px 14px rgba(74,47,34,.12)}
+.cv-a2hs.on{display:inline-flex}
+.cv-desk{display:none;margin:0 auto 18px;background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:18px 20px;max-width:440px}
+.cv-desk.on{display:block}
+.cv-desk b{display:block;font-size:17px;color:var(--cocoa-d);margin-bottom:4px}
+.cv-desk p{margin:0 0 12px;font-size:14px;color:var(--muted);line-height:1.6}
+.cv-desk .qr{width:180px;height:180px;margin:0 auto 8px;display:block;image-rendering:pixelated}
+.cv-desk .url{font-size:13px;color:var(--muted);word-break:break-all}
+.a2-ico{width:18px;height:18px;display:inline-block;vertical-align:-3px}
+.a2-warn{background:#FBEDE6;border:1px solid #EBC3B5;color:var(--text);border-radius:12px;padding:10px 12px;font-size:14.5px;line-height:1.7;text-align:left;margin:0 0 14px}
+.a2-warn b{color:var(--danger)}
+.a2-hint{background:var(--surface2);border-radius:12px;padding:11px 12px;font-size:14.5px;line-height:1.75;text-align:left;margin:0 0 14px;color:var(--text)}
+.a2-copy{display:block;width:100%;margin-top:9px;padding:10px;border-radius:10px;background:var(--cocoa);color:#fff;font-weight:700;font-size:14.5px}
+.a2-steps{list-style:none;margin:0 0 6px;padding:0;text-align:left}
+.a2-steps li{display:flex;gap:10px;align-items:flex-start;font-size:15.5px;line-height:1.6;color:var(--text);padding:9px 2px;border-bottom:1px dashed var(--line)}
+.a2-steps li:last-child{border-bottom:0}
+.a2-num{flex:none;width:26px;height:26px;border-radius:50%;background:var(--cocoa);color:#fff;font-weight:700;font-size:14px;display:grid;place-items:center;margin-top:1px}
+.a2-done{font-size:15px;color:var(--sage-d);font-weight:700;margin:8px 0 12px}
+.a2hs-bar{display:flex;align-items:center;gap:8px;background:#FBEDE6;border:1px solid #EBC3B5;border-radius:12px;padding:10px 10px 10px 12px;margin:2px 0 14px;font-size:13.5px;line-height:1.55;color:var(--text)}
+.a2hs-bar span{flex:1}
+.a2hs-bar .how{flex:none;font-weight:700;color:#fff;background:var(--danger);border-radius:999px;padding:6px 12px;font-size:13px}
+.a2hs-bar .x{flex:none;width:26px;height:26px;border-radius:50%;color:var(--muted);font-size:18px;line-height:1}
+.help .a2-first{background:var(--surface2);border-radius:12px;padding:4px 12px 12px;margin-top:4px}
+.help .a2-first button{display:block;width:100%;margin-top:8px;padding:11px;border-radius:10px;background:var(--cocoa);color:#fff;font-weight:700}
+.cv-desk p{white-space:normal}
+.cv-start.desk{background:none;color:var(--muted);box-shadow:none;font-size:14px;font-weight:600;padding:6px 10px;text-decoration:underline}
+.a2-ok{color:var(--sage-d);font-weight:700;font-size:15px;margin:10px 4px 4px}
+#a2Bar{flex:none;padding:12px 16px 0;display:none}
+#a2Bar.on{display:block}
+#a2Bar .a2hs-bar{margin:0}
+
+/* 1.18 問題回報、版本號、更新日誌 */
+.cv-report{margin-top:20px;font-size:12.5px;color:var(--muted);border-bottom:1px dashed var(--line);padding-bottom:1px;touch-action:manipulation}
+.cv-ver{position:absolute;right:14px;bottom:calc(var(--sb) + 12px);z-index:2;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--muted);padding:6px 4px;touch-action:manipulation}
+.log-list{text-align:left;max-height:60vh;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:4px 2px}
+.log-item{padding:10px 2px}
+.log-ver{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;font-weight:700;color:var(--cocoa);margin-bottom:6px}
+.log-item ul{margin:0;padding-left:20px}
+.log-item li{font-size:14px;line-height:1.75;color:var(--text)}
+.log-item li.log-hl{color:var(--danger);font-weight:700}
+.log-current{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;font-weight:700;color:var(--cocoa)!important;text-align:center;margin:12px 0 6px!important}
+
+/* 1.19 即時掃描：閃光燈圖示、裁切方式、提示；待裁切標記 */
+#live .ibtn.round{width:36px;height:36px;border-radius:50%;color:#fff;background:rgba(28,19,14,.6);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+#live .ibtn.round svg{width:20px;height:20px}
+#live #torchBtn.on{background:#F2C94C;color:#3A281E}
+/* 1.29：自動 AI 框選開關（薄荷綠）；閃光燈、AI 關閉時劃斜線 */
+#live #aiBtn.on{background:#8FD3C1;color:#1E3A33}
+/* 1.36：窄螢幕（360 寬）文字按鈕會被擠成兩行：不換行，窄螢幕間距與內距縮小 */
+#live .top .pill{white-space:nowrap;flex:none}
+@media (max-width:374px){#live .top{gap:4px;padding-left:6px;padding-right:6px} #live .top .pill{padding:7px 10px;font-size:13px}}
+/* 設定開關：說明文字較長時不要壓到開關 */
+.switch>span{flex:1;min-width:0;padding-right:12px}
+.switch .tg{flex:none}
+/* 1.31：背景 AI 狀態標籤（縮圖上方） */
+#live .thumbWrap{position:relative}
+#liveAi{position:absolute;left:0;bottom:calc(100% + 6px);display:none;align-items:center;gap:5px;white-space:nowrap;background:#8FD3C1;color:#1E3A33;font-size:12px;font-weight:800;padding:3px 8px;border-radius:999px}
+#liveAi.show{display:inline-flex}
+#liveAi .spin.sm{width:11px;height:11px;border-width:2px;border-color:rgba(30,58,51,.25);border-top-color:#1E3A33}
+#live .ibtn.round.on .slash{display:none}
+#cropModeBtn.later{background:#B86A22}
+#liveTip{position:absolute;left:50%;top:44%;transform:translate(-50%,-50%);z-index:4;background:rgba(20,14,10,.86);color:#fff;padding:12px 18px;border-radius:14px;font-size:14px;line-height:1.55;text-align:center;pointer-events:none;opacity:0;transition:opacity .25s;width:max-content;max-width:calc(100% - 32px)}
+#liveTip.show{opacity:1}
+#liveTip b{display:block;font-size:15.5px;margin-bottom:2px}
+.pg .cut,.sth .cut{position:absolute;right:5px;bottom:5px;background:#D9822B;color:#fff;font-size:12px;font-weight:700;font-style:normal;border-radius:20px;padding:1px 7px;box-shadow:0 1px 4px rgba(0,0,0,.3);z-index:2}
+.cropnote{display:none;margin:0 2px 12px;padding:10px 12px;background:#FBEBD9;border-radius:12px;font-size:13px;color:#8a4a12}
+.cropnote.on{display:block}
+.doc .th .w{position:absolute;left:8px;top:8px;background:#D9822B;color:#fff;font-size:11.5px;font-weight:700;padding:2px 8px;border-radius:20px}
+.rmeta .w{color:#B86A22;font-weight:700}
+
+/* 1.25 AI 框選、還原列 */
+#crop .tools .tool{min-width:0;flex:1 1 0;font-size:11px;padding:6px 2px}
+#undoBar{position:fixed;left:50%;bottom:calc(var(--sb) + 86px);transform:translateX(-50%) translateY(12px);background:rgba(58,40,30,.95);color:#fff;border-radius:16px;padding:10px 10px 10px 16px;display:flex;align-items:center;gap:12px;font-size:14px;z-index:41;opacity:0;pointer-events:none;transition:all .25s;max-width:92vw}
+#undoBar.show{opacity:1;pointer-events:auto;transform:translateX(-50%)}
+#undoBar button{background:var(--caramel);color:#fff;font-weight:700;border-radius:12px;padding:7px 14px;flex:none}
+
+/* 1.28 防止誤觸：長按不跳選單、不選字、不出放大鏡；不能雙擊放大頁面（輸入框照樣可以選字） */
+*{-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+body{touch-action:manipulation}
+input[type=range]{-webkit-user-select:none;user-select:none;touch-action:none}
+input[type=text],input:not([type]),textarea{-webkit-touch-callout:default;-webkit-user-select:text;user-select:text}
+
+/* 1.33：頁面縮圖照成品的比例顯示（格子本身透明，.card 是成品的形狀，置中；頁碼、✂ 等標記貼在成品角落） */
+.pg:not(.add),.sth{background:transparent!important;box-shadow:none!important;overflow:visible!important;border-radius:0!important}
+.pg .card,.sth .card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;overflow:hidden;box-shadow:0 1px 0 var(--line),0 3px 12px rgba(74,47,34,.14)}
+.pg .card{border-radius:8px}
+.sth .card{border-radius:6px;box-shadow:0 0 0 1px var(--line)}
+.pg .card img,.sth .card img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill}
+/* 即時掃描左下角縮圖：顯示框好、拉正的範圍，整張都看得到 */
+#liveThumb img{object-fit:contain}
+
+/* 1.34：iPad 上方多留 24 點，避開系統在狀態列下方的霧化（1.33 拿掉 viewport-fit=cover 沒有效果） */
+html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
+/* 1.34：寬螢幕（iPad、摺疊機展開、橫放）：選單與首頁內容限制寬度並置中，底部工具列往中間收，頁面縮圖稍大 */
+@media (min-width:700px){
+  #sheetWrap{justify-content:center}
+  #sheet{max-width:620px}
+  #homeBody,#a2Bar .a2hs-bar{max-width:760px;margin-left:auto;margin-right:auto}
+  .actions,.dock{padding-left:max(20px,calc(50% - 340px));padding-right:max(20px,calc(50% - 340px))}
+  .pagegrid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
+}
+/* 1.34：iPhone 相機權限短提示（拍攝畫面上方，5 秒後淡出） */
+#camTip{position:absolute;left:50%;top:calc(var(--st) + 108px);transform:translateX(-50%);z-index:3;display:none;align-items:center;background:rgba(28,19,14,.72);border-radius:20px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);opacity:0;transition:opacity .4s;white-space:nowrap}
+#camTip.show{display:flex;opacity:1}
+#camTip .t{color:#fff;font-size:13.5px;font-weight:600;padding:7px 4px 7px 14px}
+#camTip .x{color:rgba(255,255,255,.8);font-size:13px;padding:7px 12px 7px 8px}
+
+/* 1.35 橫拿拍攝：版面不動，按鈕與文字轉 90 度（#live.r90＝手機逆時針橫拿、.rm90＝順時針、.r180＝倒拿） */
+#live{--r:0deg}
+#live.r90{--r:90deg} #live.rm90{--r:-90deg} #live.r180{--r:180deg}
+#liveClose,#torchBtn,#aiBtn,#cropModeBtn,#autoBtn,#live .thumbWrap,#liveDone,#shotOk .ok-c,#shotOk b{transition:transform .3s ease;transform:rotate(var(--r))}
+#live #liveTip{transform:translate(-50%,-50%) rotate(var(--r))}
+/* 文字按鈕轉 90 度後會變高，往下挪一點才不會被螢幕上緣切掉 */
+#live.r90 #cropModeBtn,#live.r90 #autoBtn,#live.rm90 #cropModeBtn,#live.rm90 #autoBtn{transform:translateY(calc(50% + 14px)) rotate(var(--r))}
+#live #hint,#live #camTip{transition:transform .3s ease}
+#live.r90 #hint{left:calc(100% - 30px);top:50%;transform:translate(-50%,-50%) rotate(90deg)}
+#live.rm90 #hint{left:30px;top:50%;transform:translate(-50%,-50%) rotate(-90deg)}
+#live.r180 #hint{transform:translateX(-50%) rotate(180deg)}
+#live.r90 #camTip{left:calc(100% - 74px);top:50%;transform:translate(-50%,-50%) rotate(90deg)}
+#live.rm90 #camTip{left:74px;top:50%;transform:translate(-50%,-50%) rotate(-90deg)}
+#live.r90 #resChip,#live.rm90 #resChip,#live.r180 #resChip{display:none}
+/* iPhone 沒鎖旋轉、畫面本身轉成橫的（手機橫放，高度很矮）：快門移到右側一欄，跟內建相機一樣 */
+@media (orientation:landscape) and (max-height:540px){
+  #live{flex-direction:row}
+  #live .bottom{flex-direction:column-reverse;justify-content:space-between;width:104px;padding:calc(var(--st) + 14px) calc(env(safe-area-inset-right,0px) + 14px) calc(var(--sb) + 14px) 14px}
+  #live #liveDone{text-align:center}
+}
+</style>
+</head>
+<body>
+
+<!-- 封面（每次打開 App 先顯示） -->
+<section class="screen active" id="cover">
+  <div class="cv-scroll"><div class="cv">
+    <div class="cv-notes" aria-hidden="true">
+      <span class="cv-note" style="top:8%;left:9%;font-size:72px">♪</span>
+      <span class="cv-note" style="top:18%;right:11%;font-size:56px">♫</span>
+      <span class="cv-note" style="top:52%;left:6%;font-size:48px">♩</span>
+      <span class="cv-note" style="bottom:14%;left:16%;font-size:64px">𝄞</span>
+      <span class="cv-note" style="bottom:9%;right:14%;font-size:50px">♬</span>
+      <span class="cv-note" style="top:40%;right:8%;font-size:40px">♪</span>
+    </div>
+    <button class="cv-ver" id="cvVer" aria-label="更新日誌">▸ v</button>
+    <div class="cv-card">
+      <svg class="cv-art" viewBox="0 0 120 160" width="75" height="100" aria-hidden="true"><defs><filter id="cvsh" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="3" stdDeviation="3" flood-color="#4A2F22" flood-opacity=".18"/></filter></defs><rect x="12" y="12" width="96" height="136" rx="7" fill="#FFFCF8" filter="url(#cvsh)"/><g stroke="#3A281E" stroke-width="0.9"><line x1="22" x2="98" y1="30.0" y2="30.0"/><line x1="22" x2="98" y1="33.2" y2="33.2"/><line x1="22" x2="98" y1="36.4" y2="36.4"/><line x1="22" x2="98" y1="39.6" y2="39.6"/><line x1="22" x2="98" y1="42.8" y2="42.8"/><line x1="22" x2="98" y1="56.0" y2="56.0"/><line x1="22" x2="98" y1="59.2" y2="59.2"/><line x1="22" x2="98" y1="62.4" y2="62.4"/><line x1="22" x2="98" y1="65.6" y2="65.6"/><line x1="22" x2="98" y1="68.8" y2="68.8"/><line x1="22" x2="98" y1="82.0" y2="82.0"/><line x1="22" x2="98" y1="85.2" y2="85.2"/><line x1="22" x2="98" y1="88.4" y2="88.4"/><line x1="22" x2="98" y1="91.6" y2="91.6"/><line x1="22" x2="98" y1="94.8" y2="94.8"/><line x1="22" x2="98" y1="108.0" y2="108.0"/><line x1="22" x2="98" y1="111.2" y2="111.2"/><line x1="22" x2="98" y1="114.4" y2="114.4"/><line x1="22" x2="98" y1="117.6" y2="117.6"/><line x1="22" x2="98" y1="120.8" y2="120.8"/><line x1="22" x2="98" y1="134.0" y2="134.0"/><line x1="22" x2="98" y1="137.2" y2="137.2"/><line x1="22" x2="98" y1="140.4" y2="140.4"/><line x1="22" x2="98" y1="143.6" y2="143.6"/><line x1="22" x2="98" y1="146.8" y2="146.8"/></g><path d="M2 20V2h18M100 2h18v18M118 140v18h-18M20 158H2v-18" fill="none" stroke="#C9935F" stroke-width="4"/><line x1="0" x2="120" y1="80" y2="80" stroke="#8FB38A" stroke-width="3.5"/></svg>
+      <h1 class="cv-title">伍線譜樂譜掃描</h1>
+      <div class="cv-sub">SHEET MUSIC SCANNER</div>
+      <p class="cv-msg">這個工具完全免費，<br>掃描的資料只保存在本設備裡。<br>如果它對你瀏覽樂譜有幫助，<br>歡迎小額贊助支持後續開發與維護。</p>
+      <div><button class="cv-a2hs" id="cvA2hs">📲 請先加入主畫面，再開始掃描</button></div>
+      <div class="cv-desk" id="cvDesk"><b>這個 App 要用手機使用</b><p>請用手機的相機掃描下面的 QR Code，<br>用 Safari（iPhone）或 Chrome（Android）打開。</p><img class="qr" id="cvQr" alt="網址的 QR Code"><div class="url">andywu1101.github.io/scanner</div></div>
+      <button class="cv-start" id="cvStart">開始掃描 →</button>
+      <div class="cv-foot">精確的攜帶式樂譜掃描神器</div>
+      <div><button class="cv-author" id="cvAuthor">作者：伍祐恆 Heng-Heng Wu ▸</button></div>
+      <div><button class="cv-donate" id="cvDonate">❤ 小額贊助</button></div>
+      <div><button class="cv-report" id="cvReport">🐞 回報問題或建議</button></div>
+    </div>
+  </div></div>
+</section>
+
+<!-- 首頁 -->
+<section class="screen" id="home">
+  <header class="bar home-bar">
+    <button class="cvback" id="homeCover" aria-label="回封面"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>封面</button>
+    <h1>伍線譜樂譜掃描</h1>
+    <span class="sp1"></span>
+    <button class="ibtn" id="btnHelp" aria-label="使用教學"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M9.3 9.2a2.8 2.8 0 0 1 5.4 1c0 1.9-2.7 2.4-2.7 4"/><circle cx="12" cy="17.4" r=".6" fill="currentColor"/></svg></button>
+    <button class="ibtn" id="btnSettings" aria-label="設定"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+  </header>
+  <div id="a2Bar"><div class="a2hs-bar"><span>建議先加入主畫面，掃描才不會分散在瀏覽器和 App 兩邊。</span><button class="how" id="a2BarHow">怎麼做</button><button class="x" id="a2BarX" aria-label="暫時收起">×</button></div></div>
+  <div class="scroll" id="homeScroll"><div id="homeBody"></div></div>
+  <div class="home-donate"><button id="homeDonate">❤ 小額贊助</button></div>
+  <nav class="actions">
+    <button class="act" data-src="gallery"><span class="c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg></span>相簿匯入</button>
+    <button class="act main" data-src="live"><span class="c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/></svg></span>即時掃描</button>
+    <button class="act" data-src="camera"><span class="c"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></span>高畫質拍照</button>
+  </nav>
+</section>
+
+<!-- 即時掃描 -->
+<section class="screen" id="live">
+  <div class="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <canvas id="freeze"></canvas>
+    <div id="flash"></div>
+    <div id="shotBusy"><div class="spin"></div><b>拍攝中，請勿移動</b></div>
+    <div id="shotOk"><span class="ok-c"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></span><b>已拍好</b></div>
+    <div class="top">
+      <button class="ibtn" id="liveClose" aria-label="關閉"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <button class="ibtn round" id="torchBtn" style="display:none" aria-label="閃光燈"><svg viewBox="0 0 24 24"><path fill="currentColor" d="M13.2 2.5 5.6 13.4h5.2l-1.3 8.1 7.9-11.2h-5.3z"/><g class="slash"><path d="M4 4l16 16" stroke="#000" stroke-opacity=".5" stroke-width="4.2" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g></svg></button>
+      <button class="ibtn round" id="aiBtn" aria-label="自動 AI 框選"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2" fill="none" stroke="currentColor" stroke-width="1.8"/><text x="12" y="15.8" text-anchor="middle" font-family="Arial,Helvetica,sans-serif" font-weight="800" font-size="10" fill="currentColor">AI</text><g class="slash"><path d="M4 4l16 16" stroke="#000" stroke-opacity=".5" stroke-width="4.2" stroke-linecap="round"/><path d="M4 4l16 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></g></svg></button>
+      <span class="sp"></span>
+      <button class="pill" id="cropModeBtn">立即裁切</button>
+      <button class="pill" id="autoBtn">自動</button>
+    </div>
+    <div class="pill" id="hint">影像引擎載入中…</div>
+    <div id="camTip"><button class="t" id="camTipGo">📷 每次都要允許相機？</button><button class="x" id="camTipX" aria-label="關閉">✕</button></div>
+    <div class="pill" id="resChip"></div>
+    <div id="liveTip"><b></b><span></span></div>
+  </div>
+  <div class="bottom">
+    <div class="thumbWrap"><button id="liveThumb"><img alt=""><span>0</span></button><b id="liveAi"></b></div>
+    <button id="shutter" aria-label="拍攝"><svg viewBox="0 0 76 76"><circle id="ring" cx="38" cy="38" r="36" fill="none" stroke="#8FB38A" stroke-width="4" stroke-dasharray="226.2" stroke-dashoffset="226.2" stroke-linecap="round"/></svg></button>
+    <button id="liveDone">完成</button>
+  </div>
+</section>
+
+<!-- 裁切 -->
+<section class="screen" id="crop">
+  <header class="bar">
+    <button class="tbtn" id="cropCancel">取消</button>
+    <h1 style="text-align:center;font-size:16px">調整掃描範圍</h1>
+    <button class="tbtn solid" id="cropOk">確定</button>
+  </header>
+  <div id="cropStage">
+    <img id="cropImg" alt="">
+    <svg id="cropSvg"></svg>
+    <div id="pip"><canvas id="pipCv"></canvas><div class="pip-gl"></div><span class="pip-lb">成品預覽</span></div>
+    <svg id="cropHandles"></svg>
+    <div id="pipFull"><div class="wrap"><canvas id="pipFullCv"></canvas><div class="pip-gl"></div></div><span class="tip">點一下回到框選</span></div>
+    <canvas id="loupe" width="264" height="264"></canvas>
+  </div>
+  <div class="tools">
+    <button class="tool" id="cropRetake"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>重拍</button>
+    <button class="tool" id="cropCurve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7c4-3 14-3 18 0M3 17c4 3 14 3 18 0M3 7v10M21 7v10"/></svg><span>直線</span></button>
+    <button class="tool" id="cropFull"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v3M16 3v3M8 21v-3M16 21v-3M3 8h3M3 16h3M21 8h-3M21 16h-3"/></svg>全頁</button>
+    <button class="tool" id="cropNext" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><path d="M12 10v6M9 13h6"/></svg>確定，拍下一張</button>
+    <button class="tool" id="cropPrev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><rect x="12" y="10" width="7" height="6" rx="1" fill="currentColor" stroke="none"/></svg>成品</button>
+    <button class="tool" id="cropAuto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M12 8l1.2 2.8L16 12l-2.8 1.2L12 16l-1.2-2.8L8 12l2.8-1.2z"/></svg>自動偵測</button>
+    <button class="tool" id="cropAI"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>AI 框選</button>
+  </div>
+</section>
+
+<!-- 全部文件 -->
+<section class="screen" id="library">
+  <header class="bar">
+    <button class="ibtn" id="libBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <h1 id="libTitle" style="font-size:17px">全部文件</h1>
+    <button class="tbtn" id="libSelect">選取</button>
+  </header>
+  <div class="scroll"><div class="doclist" id="libList"></div></div>
+  <div class="dock" id="libDock" style="display:none">
+    <button class="tool" id="libAll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 12l3 3 5-6"/></svg><span>全選</span></button>
+    <button class="tool" id="libMerge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="8" height="10" rx="1.5"/><rect x="13" y="3" width="8" height="10" rx="1.5"/><path d="M7 13v3a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2v-3M12 18v3"/></svg><span>合併成一份</span></button>
+    <button class="tool danger" id="libDel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg><span>刪除</span></button>
+  </div>
+</section>
+
+<!-- 高畫質連拍 -->
+<section class="screen" id="burst">
+  <header class="bar">
+    <h1 style="font-size:16px">高畫質連拍</h1>
+    <button class="tbtn solid" id="burstDone">完成</button>
+  </header>
+  <div id="burstStage">
+    <img id="burstImg" alt="">
+    <div class="pill" id="burstCount">尚未拍攝</div>
+  </div>
+  <div class="controls">
+    <div class="opt"><span>每張先確認裁切</span><button class="tg" id="burstConfirm" aria-label="每張先確認裁切"></button></div>
+    <div class="row">
+      <button class="side" id="burstRetake"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 2v6h6"/><path d="M2.7 15.6A9 9 0 1 0 5 6.5L2.5 8"/></svg>重拍上一張</button>
+      <div class="side"><button id="burstNext" aria-label="拍下一張"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></button><span style="margin-top:6px;font-size:13.5px">拍下一張</span></div>
+      <span class="side"></span>
+    </div>
+  </div>
+</section>
+
+<!-- 文件 -->
+<section class="screen" id="doc">
+  <header class="bar">
+    <button class="ibtn" id="docBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <button class="title-btn" id="docTitle"></button>
+    <button class="tbtn" id="docSelect">選取</button>
+    <button class="ibtn" id="docMore" aria-label="更多"><svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button>
+  </header>
+  <div class="scroll"><div class="hint-line" id="docHint">長按頁面可拖曳調整順序</div><div class="cropnote" id="cropNote"></div><div class="pagegrid" id="pageGrid"></div></div>
+  <div class="dock" id="docSelDock" style="display:none">
+    <button class="tool" id="docSelAll"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="M8 12l3 3 5-6"/></svg><span>全選</span></button>
+    <span class="tool selcount" id="docSelCount">已選 0 頁</span>
+    <button class="tool danger" id="docSelDel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg><span>刪除</span></button>
+  </div>
+  <div class="dock" id="docDock">
+    <button class="tool" id="docAdd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新增頁面</button>
+    <button class="tool" id="docMode"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" /><path d="M12 3a9 9 0 0 1 0 18" fill="currentColor"/></svg>統一調整</button>
+    <button class="tool" id="docPdf"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>匯出 PDF</button>
+    <button class="tool" id="docImg"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.8"/><path d="M21 15l-5-5L5 21"/></svg>匯出圖片</button>
+  </div>
+</section>
+
+<!-- 單頁 -->
+<section class="screen" id="page">
+  <header class="bar">
+    <button class="ibtn" id="pageBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <h1 id="pageTitle" style="text-align:center;font-size:16px"></h1>
+    <button class="ibtn" id="pageDel" aria-label="刪除此頁"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg></button>
+  </header>
+  <div id="viewStage">
+    <img id="viewImg" alt="">
+    <button class="navarrow" id="prevBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
+    <button class="navarrow" id="nextBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
+    <div id="viewBusy"><div class="spin"></div></div>
+    <div id="adjWrap"><canvas id="adjMain"></canvas><canvas id="adjDetail"></canvas><canvas id="adjCmp"></canvas><canvas id="adjCmpDetail"></canvas></div>
+    <div class="pill" id="cmpTag">預設</div>
+  </div>
+  <div class="modes" id="modeChips"></div>
+  <div id="adjPanel">
+    <div class="adjhead"><b id="adjTitle">調整</b><button class="tbtn" id="adjReset">全部重設</button><button class="tbtn solid" id="adjDone">完成</button></div>
+    <div class="adjtabs" id="adjTabs"></div>
+    <div class="adjone">
+      <div class="adjval"><span id="adjLo"></span><output id="adjVal"></output><span id="adjHi"></span></div>
+      <input type="range" id="adjRange">
+    </div>
+    <div class="adjnote" id="adjNote"></div>
+  </div>
+  <div class="dock" style="border-top:0">
+    <button class="tool" id="pgCrop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>裁切</button>
+    <button class="tool" id="pgRotL"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="9" width="12" height="12" rx="1.5"/><path d="M21 13V8a4 4 0 0 0-4-4h-6"/><path d="M14 1l-3 3 3 3"/></svg>向左轉</button>
+    <button class="tool" id="pgRotR"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="1.5"/><path d="M3 13V8a4 4 0 0 1 4-4h6"/><path d="M10 1l3 3-3 3"/></svg>向右轉</button>
+    <button class="tool" id="pgUndo" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>上一步</button>
+    <button class="tool" id="pgRedo" disabled><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>下一步</button>
+  </div>
+</section>
+
+<div id="sheetWrap"><div id="sheet"></div></div>
+
+<!-- 小額贊助彈窗（內容比照音樂聽力練習 App；管道清單 / 街口 / 銀行 / 贊助者名單） -->
+<div class="dmodal" id="donateModal">
+  <div class="dbox">
+    <div class="dico">❤</div>
+    <h3>支持這個工具</h3>
+    <div id="donateIntro">
+      <p>這個工具完全免費，你的支持會用於後續開發與維護，感謝你 🙏</p>
+      <p>贊助者會列入贊助者名單。</p>
+    </div>
+    <div class="dlinks" id="donate_">
+      <a class="ditem" href="https://portaly.cc/heng-heng.music/support" target="_blank" rel="noopener"><span class="ico">❤</span> Portaly 小額贊助</a>
+      <button type="button" class="ditem" data-panel="Jko"><span class="ico">📱</span> 街口支付贊助</button>
+      <button type="button" class="ditem" data-panel="Bank"><span class="ico">🏦</span> 銀行轉帳贊助</button>
+      <button type="button" class="ditem" id="sponsorEntry" data-panel="Sponsors"><span class="ico">💛</span> 贊助者名單</button>
+    </div>
+    <div class="dlinks" id="donateJko" style="display:none">
+      <a class="jko-card" href="https://service.jkopay.com/r/transfer?j=Transfer:902103863" target="_blank" rel="noopener">
+        <img src="jkopay-qr.png" alt="街口支付 QR 碼，Heng-Heng Music，帳號 902103863">
+        <span class="jko-label">開啟街口支付</span>
+      </a>
+      <div class="jko-acct">街口帳號 <b>902103863</b><button class="copy-btn" type="button" data-copy="902103863">複製</button></div>
+      <p class="pay-note">此 QR 為 <b>TWQR 共通碼</b>，可用街口支付，或<b>任一家銀行的網銀 App</b> 掃描付款。</p>
+      <a class="form-link" href="https://forms.gle/ZwXgCHkD8gwYbmseA" target="_blank" rel="noopener">👉 請點此填寫贊助者表單，讓我將您放上名單</a>
+      <a class="ditem" href="https://line.me/ti/p/LF15Mk2vef" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="#06C755" d="M12 2.6c-5.5 0-10 3.6-10 8.1 0 3.9 3.6 7.2 8.4 7.9.33.07.78.22.89.5.1.26.07.66.03.92 0 0-.12.72-.14.87-.05.26-.21 1 .88.55 1.1-.46 5.9-3.48 8.05-5.96 1.48-1.63 2.19-3.28 2.19-5.11 0-4.5-4.5-8.1-10-8.1z"/></svg></span> 祐恆的 LINE</a>
+      <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
+    </div>
+    <div class="dlinks" id="donateBank" style="display:none">
+      <div class="bank-row"><span class="bk">銀行</span><b>中國信託 (822)</b><button class="copy-btn" type="button" data-copy="822">複製代號</button></div>
+      <div class="bank-row"><span class="bk">帳號</span><b>163540424795</b><button class="copy-btn" type="button" data-copy="163540424795">複製</button></div>
+      <div class="bank-row"><span class="bk">戶名</span><b>伍○恆</b></div>
+      <p class="pay-note">轉帳僅需銀行代號與帳號；戶名供核對用。</p>
+      <a class="form-link" href="https://forms.gle/ZwXgCHkD8gwYbmseA" target="_blank" rel="noopener">👉 請點此填寫贊助者表單，讓我將您放上名單</a>
+      <a class="ditem" href="https://line.me/ti/p/LF15Mk2vef" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="#06C755" d="M12 2.6c-5.5 0-10 3.6-10 8.1 0 3.9 3.6 7.2 8.4 7.9.33.07.78.22.89.5.1.26.07.66.03.92 0 0-.12.72-.14.87-.05.26-.21 1 .88.55 1.1-.46 5.9-3.48 8.05-5.96 1.48-1.63 2.19-3.28 2.19-5.11 0-4.5-4.5-8.1-10-8.1z"/></svg></span> 祐恆的 LINE</a>
+      <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
+    </div>
+    <div class="dlinks" id="donateSponsors" style="display:none">
+      <div class="sponsor-list" id="sponsorList"></div>
+      <p class="pay-note">每一位同意公開的贊助者，都會列在贊助者名單中，感謝你的支持 🙏</p>
+      <button type="button" class="ditem" data-panel="">← 返回贊助管道</button>
+    </div>
+    <button type="button" class="ditem" style="width:100%;margin-bottom:12px" id="donateToAuthor"><span class="ico">🔗</span> 作者主頁</button>
+    <button type="button" class="d-dismiss" data-close>關閉</button>
+  </div>
+</div>
+
+<!-- 加入主畫面說明（1.17） -->
+<div class="dmodal" id="a2hsModal">
+  <div class="dbox">
+    <div class="dico" style="color:var(--cocoa)"><svg style="width:44px;height:44px;display:inline-block" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 10.5H6.6a1.6 1.6 0 0 0-1.6 1.6v7.3a1.6 1.6 0 0 0 1.6 1.6h10.8a1.6 1.6 0 0 0 1.6-1.6v-7.3a1.6 1.6 0 0 0-1.6-1.6H15.5"/><path d="M12 2.9v11.6"/><path d="M8.3 6.5 12 2.8l3.7 3.7"/></svg></div>
+    <h3>加入主畫面</h3>
+    <p style="margin-bottom:12px">加入之後就像一般 App：從主畫面直接打開、全螢幕使用、載入更快。</p>
+    <div class="a2-warn"><b>⚠ 請先加入主畫面，再開始掃描。</b><br>在瀏覽器裡掃描的資料，不會出現在主畫面的 App 裡。</div>
+    <div class="a2-hint" id="a2InApp" style="display:none">你現在是在 LINE 或其他 App 裡打開的，這裡<b>沒有</b>「加入主畫面」。<br>請按右上角或右下角的「⋯」或「⋮」，選<b>「在瀏覽器中開啟」</b>；或按下面的按鈕複製網址，貼到 <span class="a2Br">Safari</span> 的網址列。<button type="button" class="a2-copy" id="a2Copy">📋 複製網址</button></div>
+    <ol class="a2-steps" id="a2StepsIOS">
+      <li><span class="a2-num">1</span><span>長按網址列，點擊最上方的 <span style="white-space:nowrap"><svg class="a2-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 10.5H6.6a1.6 1.6 0 0 0-1.6 1.6v7.3a1.6 1.6 0 0 0 1.6 1.6h10.8a1.6 1.6 0 0 0 1.6-1.6v-7.3a1.6 1.6 0 0 0-1.6-1.6H15.5"/><path d="M12 2.9v11.6"/><path d="M8.3 6.5 12 2.8l3.7 3.7"/></svg> 分享</span>（或點擊網址列的選單，可能在「⋯」裡面，找到 <svg class="a2-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 10.5H6.6a1.6 1.6 0 0 0-1.6 1.6v7.3a1.6 1.6 0 0 0 1.6 1.6h10.8a1.6 1.6 0 0 0 1.6-1.6v-7.3a1.6 1.6 0 0 0-1.6-1.6H15.5"/><path d="M12 2.9v11.6"/><path d="M8.3 6.5 12 2.8l3.7 3.7"/></svg>）</span></li>
+      <li><span class="a2-num">2</span><span>往下找到並點「加入主畫面」</span></li>
+      <li><span class="a2-num">3</span><span>點右上角的「加入」</span></li>
+    </ol>
+    <ol class="a2-steps" id="a2StepsAndroid" style="display:none">
+      <li><span class="a2-num">1</span><span>點 Chrome 右上角的選單「⋮」</span></li>
+      <li><span class="a2-num">2</span><span>點「安裝應用程式」或「加到主畫面」（不同手機用詞不同）</span></li>
+      <li><span class="a2-num">3</span><span>點「安裝」或「新增」</span></li>
+    </ol>
+    <p class="a2-done">完成後，從主畫面的「伍線譜掃描」打開就可以了 🎉</p>
+    <p style="font-size:13.5px;margin:-4px 0 12px">如果已經加入過，請直接從主畫面的「伍線譜掃描」圖示打開。</p>
+    <button type="button" class="d-dismiss" data-close>關閉</button>
+  </div>
+</div>
+
+<!-- 更新日誌（1.18） -->
+<div class="dmodal" id="logModal">
+  <div class="dbox">
+    <div class="dico" style="color:var(--cocoa)">📝</div>
+    <h3>更新日誌</h3>
+    <div class="log-list" id="logList"></div>
+    <p class="log-current" id="logCurrent"></p>
+    <button type="button" class="d-dismiss" data-close>關閉</button>
+  </div>
+</div>
+
+<!-- 作者主頁彈窗 -->
+<div class="dmodal" id="authorModal">
+  <div class="dbox">
+    <div class="dico" style="color:var(--cocoa)">🎼</div>
+    <h3>作者主頁</h3>
+    <p>伍祐恆 Heng-Heng Wu</p>
+    <p class="author-invite">如果想精進鋼琴演奏、樂理、視唱、聽寫能力，歡迎來找我上課，可以加 LINE 私訊喔！</p>
+    <div class="dlinks">
+      <a class="ditem" href="https://line.me/ti/p/LF15Mk2vef" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="#06C755" d="M12 2.6c-5.5 0-10 3.6-10 8.1 0 3.9 3.6 7.2 8.4 7.9.33.07.78.22.89.5.1.26.07.66.03.92 0 0-.12.72-.14.87-.05.26-.21 1 .88.55 1.1-.46 5.9-3.48 8.05-5.96 1.48-1.63 2.19-3.28 2.19-5.11 0-4.5-4.5-8.1-10-8.1z"/></svg></span> 祐恆的 LINE</a>
+      <a class="ditem" href="https://portaly.cc/heng-heng.music" target="_blank" rel="noopener"><span class="ico">🔗</span> Portaly 主頁</a>
+      <a class="ditem" href="https://www.youtube.com/@HengHengWu" target="_blank" rel="noopener"><span class="ico"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="#FF0000" d="M23 7.6a3 3 0 0 0-2.1-2.1C19 5 12 5 12 5s-7 0-8.9.5A3 3 0 0 0 1 7.6 31.3 31.3 0 0 0 .5 12 31.3 31.3 0 0 0 1 16.4a3 3 0 0 0 2.1 2.1C5 19 12 19 12 19s7 0 8.9-.5a3 3 0 0 0 2.1-2.1A31.3 31.3 0 0 0 23.5 12 31.3 31.3 0 0 0 23 7.6z"/><path fill="#fff" d="M9.75 15.5l6-3.5-6-3.5z"/></svg></span> YouTube 頻道</a>
+    </div>
+    <button type="button" class="d-dismiss" data-close>關閉</button>
+  </div>
+</div>
+<div id="undoBar"><span></span><button id="undoBtn">還原</button></div>
+<div id="busy"><div class="box"><div class="spin"></div><div id="busyMsg">處理中…</div></div></div>
+<div id="toast"></div>
+<input type="file" id="fileCamera" accept="image/*" capture="environment">
+<input type="file" id="fileGallery" accept="image/*" multiple>
+
+<script src="lib/Sortable.min.js"></script>
+<script src="app.js"></script>
+<!-- Cloudflare Web Analytics --><script type='module' src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "6133f40155bc470795e23b87203478d7"}'></script><!-- End Cloudflare Web Analytics -->
+</body>
+</html>
