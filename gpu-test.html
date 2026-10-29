@@ -27,6 +27,7 @@
 <h1>AI 框選測速（WebGPU）</h1>
 <p class="sub">比較同一個 AI 模型用 CPU 和 GPU（WebGPU）執行的速度。只做測試，不會存任何資料，也不會開相機。第一次會下載約 32 MB，建議用 Wi-Fi。</p>
 <button id="go">開始測速</button>
+<button id="goW" style="margin-top:10px;background:#7A5A3E">背景執行緒模式測速（和 App 一樣）</button>
 <div id="out"></div>
 <div id="log"></div>
 <p class="note">伍線譜樂譜掃描・測試頁　ONNX Runtime Web 1.30.0（MIT）・U²-Net u2netp（Apache 2.0）</p>
@@ -87,6 +88,49 @@ function compare(a, b) {
   return { maxd, iou: uni ? inter / uni : 1 };
 }
 
+// 背景執行緒模式：和 App 的 ai-worker.js 一樣在 Worker 裡跑
+function workerBench(w, ep, input) {
+  return new Promise((res, rej) => {
+    w.onmessage = (e) => {
+      const d = e.data;
+      if (d.type === 'log') log(d.msg);
+      else if (d.type === 'done') res(d);
+      else if (d.type === 'error') rej(new Error(d.msg));
+    };
+    w.postMessage({ type: 'bench', ep, input: input.slice(), model: new URL('lib/ai/u2netp.onnx', location.href).href });
+  });
+}
+$('#goW').onclick = async () => {
+  const btns = [$('#go'), $('#goW')]; btns.forEach((b) => (b.disabled = true)); $('#goW').textContent = '背景執行緒測速中…';
+  $('#log').textContent = ''; const out = $('#out'); out.style.display = 'block';
+  let html = row('模式', '背景執行緒（和 App 一樣）');
+  let w;
+  try {
+    w = new Worker('gpu-test/worker-bench.js');
+    const chk = await new Promise((res) => { w.onmessage = (e) => res(e.data); w.postMessage({ type: 'check' }); });
+    html += row('背景執行緒 WebGPU', chk.gpu ? '支援（' + (chk.name || '可用') + '）' : (chk.hasNav ? '有介面但無法使用' + (chk.name ? '：' + chk.name : '') : '不支援'), chk.gpu ? 'ok' : 'bad');
+    out.innerHTML = html;
+    const input = await makeInput();
+    log('背景 CPU 測速中…');
+    const c = await workerBench(w, 'wasm', input);
+    html += row('CPU 平均（第 2～5 次）', ms(c.avg));
+    out.innerHTML = html;
+    if (chk.gpu) {
+      log('背景 GPU 測速中…');
+      try {
+        const g = await workerBench(w, 'webgpu', input);
+        const cmp = compare(c.mask, g.mask), x = c.avg / g.avg;
+        html += row('GPU 第一次', ms(g.first)) + row('GPU 平均（第 2～5 次）', ms(g.avg));
+        html += row('結果一致性', (cmp.iou * 100).toFixed(1) + '%（差異最大 ' + cmp.maxd + '）', cmp.iou > 0.98 ? 'ok' : 'bad');
+        html += `<div class="big ${x >= 1 ? 'ok' : 'bad'}">背景 GPU 比 CPU ${x >= 1 ? '快 ' + x.toFixed(1) + ' 倍' : '慢 ' + (1 / x).toFixed(1) + ' 倍'}</div>`;
+      } catch (e) { html += row('背景 GPU', '執行失敗：' + e.message, 'bad'); }
+    } else html += row('背景 GPU', '無法使用，略過', 'bad');
+  } catch (e) { html += row('錯誤', e.message, 'bad'); log(String(e && e.stack || e)); }
+  if (w) w.terminate();
+  html += row('測試時間', new Date().toLocaleString('zh-TW'));
+  out.innerHTML = html;
+  btns.forEach((b) => (b.disabled = false)); $('#goW').textContent = '背景執行緒模式測速（和 App 一樣）';
+};
 $('#go').onclick = async () => {
   $('#go').disabled = true; $('#go').textContent = '測速中，請稍候…';
   $('#log').textContent = ''; const out = $('#out'); out.style.display = 'block'; out.innerHTML = '';
