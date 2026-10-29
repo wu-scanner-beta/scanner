@@ -743,7 +743,7 @@ async function startLive(docId) {
     whenReady().then(() => { if (live.running && settings.autoShutter) setHint('將文件放進畫面中'); });
     liveLoop();
     requestAnimationFrame(drawOverlay);
-    if (aiAsk) { live.paused = true; setTimeout(aiAskNow, 1000); } // 相機畫面出來、系統權限詢問結束後再等 1 秒；問完之前先不自動拍
+    if (aiAsk) { live.paused = true; setTimeout(aiAsk === 'up' ? aiUpAskNow : aiAskNow, 1000); } // 相機畫面出來、系統權限詢問結束後再等 1 秒；問完之前先不自動拍
   } catch (err) {
     console.error(err);
     stopLive();
@@ -1465,7 +1465,7 @@ $('#aiBtn').onclick = async () => {
     live.paused = true;
     const had = await aiCached();
     const ok = await aiEnsure(true); // 1.31：用 App 內的確認視窗（系統 confirm 會讓 iPhone 相機凍結）
-    if (!had && ok) await restartCamera(); // 下載十幾 MB 期間 iPhone 可能中斷相機：重新開一次
+    if (!had && ok) await restartCamera(); // 下載幾十 MB 期間 iPhone 可能中斷相機：重新開一次
     live.paused = false;
     if (!live.running) return;
     if (!ok) return;
@@ -1476,22 +1476,36 @@ $('#aiBtn').onclick = async () => {
     liveTip('自動 AI 框選', '已關閉');
   }
 };
-/* 2.1 自動 AI 框選預設開啟（作者：有些人不知道可以打開）。AI 資料要先下載約 15 MB，所以：
+/* 2.1 自動 AI 框選預設開啟（作者：有些人不知道可以打開）。AI 資料要先下載（3.0 起約 32 MB），所以：
    第一次進拍攝畫面時（相機開好再等 1 秒）用 App 內視窗詢問；按「下載」→ 下載完自動開啟並重開相機（1.31 iPhone 凍結），
    按「暫時不要」→ 維持關閉、不再問（settings.aiAsked）。舊使用者也問一次（作者決定；以前特地關掉的人也會被問一次）。
    已開啟的不問；已下載過資料但沒開的直接開啟；弱 Android（裝置記憶體 < 4 GB 或曾經記憶體不足自動降檔）不問、維持關閉，自己按 AI 按鈕 */
 const aiWeak = () => !IS_IOS && (settings.camAutoLow || (navigator.deviceMemory > 0 && navigator.deviceMemory < 4));
+// 回傳 'ask'＝問要不要下載並開啟；'up'＝3.0 舊使用者問要不要升級引擎；false＝不問
 async function aiDefaultCheck() {
+  const st = await aiState();
+  if (aiUpgradable(st) && !settings.aiUpAsked) return 'up';
   if (settings.aiAsked || settings.autoAI) return false;
   if (aiWeak()) return false;
-  if (await aiCached()) { settings.autoAI = true; settings.aiAsked = true; saveSettings(); updateLiveBtns(); return false; }
-  return true;
+  if (st.model && aiPickEngine(st)) { settings.autoAI = true; settings.aiAsked = true; saveSettings(); updateLiveBtns(); return false; }
+  return 'ask';
+}
+// 3.0：已經用舊引擎的人，問一次要不要升級（同樣在相機開好 1 秒後、暫停自動拍攝；按「暫時不要」→ 設定裡有升級按鈕）
+async function aiUpAskNow() {
+  if (!live.running || current !== 'live' || settings.aiUpAsked) { live.paused = false; return; }
+  settings.aiUpAsked = true; saveSettings();
+  live.paused = true;
+  const yes = await askSheet('AI 框選升級', `新版 AI 框選速度更快，需要再下載約 ${AI_UP_MB} MB（只需一次），建議在 Wi-Fi 下使用。`, '下載並升級', '暫時不要');
+  let ok = false;
+  if (yes && live.running) { ok = await aiUpgrade(); if (ok) await restartCamera(); }
+  live.paused = false;
+  if (ok && live.running) liveTip('AI 框選已升級', '速度更快了');
 }
 async function aiAskNow() {
   if (!live.running || current !== 'live' || settings.autoAI || settings.aiAsked) { live.paused = false; return; }
   settings.aiAsked = true; saveSettings();
   live.paused = true;
-  const yes = await askSheet('自動 AI 框選', '拍完自動用 AI 精準框好紙張，省去調整的麻煩。<br>需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。', '下載並開啟', '暫時不要');
+  const yes = await askSheet('自動 AI 框選', `拍完自動用 AI 精準框好紙張，省去調整的麻煩。<br>需要先下載約 ${AI_DL_MB} MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。`, '下載並開啟', '暫時不要');
   let ok = false;
   if (yes && live.running) { ok = await aiEnsure(true, true); if (ok) await restartCamera(); }
   live.paused = false;
@@ -2997,12 +3011,18 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setCam">${[['auto', '自動'], ['high', '高畫質'], ['low', '省記憶體']].map(([k, n]) => `<button data-k="${k}" class="${(settings.camQ || 'auto') === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     ${IS_IOS ? '<button class="srow" id="setCamPerm" style="margin-top:6px"><span>📷 每次都要允許相機？ ›<span class="sub">設定成永遠允許，開即時掃描就不用每次按</span></span></button>' : ''}
     <button class="srow" id="setDefAdj" style="margin-top:6px"><span>預設調整數值 ›<span class="sub">新文件一開始用的曝光、濃淡、銳利度等數值</span></span></button>
+    <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
     <button class="srow" id="setReport"><span>🐞 回報問題或建議 ›</span></button>
     <button class="srow" id="setLog"><span>更新日誌 ›<span class="sub">目前版本 v${APP_VER}</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
+    // 3.0：還在用舊 AI 引擎的人（按過「暫時不要」或還沒被問）才顯示，升級後消失
+    aiState().then((st) => { const b = s.querySelector('#setAiUp'); if (b && aiUpgradable(st)) b.style.display = ''; });
+    s.querySelector('#setAiUp').onclick = async () => {
+      if (await aiUpgrade()) { s.querySelector('#setAiUp').style.display = 'none'; toast('AI 引擎已升級'); }
+    };
     if (s.querySelector('#setCamPerm')) s.querySelector('#setCamPerm').onclick = () => camPermHelp();
     const camDesc = () => {
       const q = settings.camQ || 'auto', t = camTier();
@@ -3149,47 +3169,102 @@ function undoBar(msg, fn) {
   undoT = setTimeout(() => b.classList.remove('show'), fn ? 8000 : 3000);
 }
 
-/* ---------- AI 框選（1.25） ----------
+/* ---------- AI 框選（1.25；3.0 新引擎） ----------
    U²-Net（u2netp，4.6 MB）在 ai-worker.js 以 ONNX Runtime Web 執行，找出「哪一塊是紙」；
-   worker.js 的 maskQuad 再把遮罩變成四個角並沿紙邊貼齊。模型與執行環境約 15 MB，第一次使用時才下載，
-   存在獨立的快取 cocoscan-ai（換版本不會被清掉），之後離線也能用 */
-const AI_FILES = [['lib/ai/ort.wasm.min.js', 'text/javascript', 145070], ['lib/ai/ort-wasm-simd.wasm', 'application/wasm', 10551547], ['lib/ai/u2netp.onnx', 'application/octet-stream', 4574861]];
+   worker.js 的 maskQuad 再把遮罩變成四個角並沿紙邊貼齊。模型與執行環境第一次使用時才下載，
+   存在獨立的快取 cocoscan-ai（換版本不會被清掉），之後離線也能用。
+   3.0：新引擎 ONNX Runtime Web 1.30.0（可用 GPU／WebGPU，約 32 MB；作者決定一律裝新的）。
+     - 下載完在背景比較一次 CPU 與 GPU（aiBench），快的記在 settings.aiEP（iPhone 17 實測 GPU 快 4 倍多，Y31 GPU 反而慢）
+     - 舊使用者（快取裡只有 1.17.3 舊引擎）：舊引擎照常可用；進拍攝畫面詢問一次升級（settings.aiUpAsked），
+       按「暫時不要」的在設定「預設調整數值」下方出現「有可升級的AI 引擎，點擊升級」，升級後消失
+     - 安全網：新引擎載入失敗（ENGINE: 錯誤）→ settings.aiForceOld，下載舊引擎改用它；GPU 出錯由 ai-worker 自動改用 CPU */
+const AI_MODEL = ['lib/ai/u2netp.onnx', 'application/octet-stream', 4574861];
+const AI_NEW = [['lib/ai/ort.webgpu.min.js', 'text/javascript', 66417], ['lib/ai/ort-wasm-simd-threaded.asyncify.mjs', 'text/javascript', 53057], ['lib/ai/ort-wasm-simd-threaded.asyncify.wasm', 'application/wasm', 26781914]];
+const AI_OLD = [['lib/ai/ort.wasm.min.js', 'text/javascript', 145070], ['lib/ai/ort-wasm-simd.wasm', 'application/wasm', 10551547]];
+const AI_NEW_VER = '1.30.0';
 const AI_CACHE = 'cocoscan-ai';
-let aiWorker = null, aiSeq = 0;
+const mbOf = (list) => Math.ceil(list.reduce((a, f) => a + f[2], 0) / 1e6); // 跟使用者說的 MB（新下載 32、升級 27）
+let aiWorker = null, aiSeq = 0, aiInitP = null, aiEngineNow = null;
 const aiPending = new Map();
-function aiCall(payload, transfer) {
-  if (!aiWorker) {
-    aiWorker = new Worker('ai-worker.js');
-    aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
-    aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error(e.message || 'AI 載入失敗')); aiPending.clear(); aiWorker = null; };
-  }
-  return new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
-}
-async function aiCached() {
+async function aiHas(list) {
   try {
     if (!('caches' in window)) return false;
     const c = await caches.open(AI_CACHE);
-    for (const [f] of AI_FILES) if (!(await c.match(new URL(f, location.href).href))) return false;
+    for (const [f] of list) if (!(await c.match(new URL(f, location.href).href))) return false;
     return true;
   } catch (_) { return false; }
 }
-async function aiEnsure(inApp, noAsk) {
-  if (await aiCached()) return true;
-  const ask = 'AI 框選需要先下載約 15 MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？';
-  if (!noAsk && (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask))) return false; // 2.1：noAsk＝已經在預設開啟的詢問裡問過
-  const total = AI_FILES.reduce((a, f) => a + f[2], 0);
+async function aiState() {
+  const [model, neu, old] = await Promise.all([aiHas([AI_MODEL]), aiHas(AI_NEW), aiHas(AI_OLD)]);
+  return { model, neu, old };
+}
+// 能用 AI 的引擎：新引擎（沒被安全網停用）優先，其次舊引擎
+function aiPickEngine(st) { return st.neu && !settings.aiForceOld ? 'new' : st.old ? 'old' : st.neu ? 'new' : null; }
+async function aiCached() { const st = await aiState(); return st.model && !!aiPickEngine(st); }
+const aiUpgradable = (st) => st.model && st.old && !st.neu && !settings.aiForceOld;
+function aiReset() {
+  if (aiWorker) aiWorker.terminate();
+  for (const p of aiPending.values()) p.rej(new Error('AI 重新載入'));
+  aiPending.clear(); aiWorker = null; aiInitP = null; aiEngineNow = null;
+}
+function aiPost(payload, transfer) {
+  return new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
+}
+function aiInit() {
+  if (aiInitP) return aiInitP;
+  aiInitP = (async () => {
+    const st = await aiState();
+    const eng = aiPickEngine(st) || 'new';
+    aiWorker = new Worker('ai-worker.js');
+    aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
+    aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error('ENGINE:' + (e.message || 'AI 載入失敗'))); aiPending.clear(); aiWorker = null; aiInitP = null; };
+    await aiPost({ type: 'init', engine: eng, ep: settings.aiEP || 'wasm' });
+    aiEngineNow = eng;
+    // 新引擎還沒比較過 CPU／GPU（例如剛下載完、或新版第一次用）：在背景比較一次
+    if (eng === 'new' && settings.aiBenchV !== AI_NEW_VER) aiBench();
+  })();
+  aiInitP.catch(() => { aiInitP = null; }); // 載入失敗下次重來
+  return aiInitP;
+}
+async function aiBench() {
+  try {
+    const r = await aiPost({ type: 'bench' });
+    settings.aiEP = r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm';
+    settings.aiBenchV = AI_NEW_VER; saveSettings();
+    console.info('AI bench', r, settings.aiEP);
+    await aiPost({ type: 'setEP', ep: settings.aiEP });
+  } catch (e) { console.warn('AI bench', e); }
+}
+// 送一個工作給 AI；新引擎載入失敗（ENGINE:）時啟動安全網：改用舊引擎再試一次
+async function aiCall(payload, transfer, retried) {
+  const keep = payload.buffer ? payload.buffer.slice(0) : null; // 送出時 buffer 會被轉走，重試要用備份
+  try {
+    await aiInit();
+    return await aiPost(payload, transfer);
+  } catch (e) {
+    const m = String(e && e.message);
+    if (retried || !m.startsWith('ENGINE:') || aiEngineNow === 'old') throw new Error(m.replace(/^ENGINE:/, ''));
+    console.warn('AI 新引擎載入失敗，改用舊引擎', m);
+    settings.aiForceOld = true; saveSettings(); aiReset();
+    if (!(await aiHas(AI_OLD)) && !(await aiDownload(AI_OLD, 'AI 改用相容模式，下載中…'))) throw new Error('無法載入 AI 引擎');
+    return aiCall(keep ? Object.assign({}, payload, { buffer: keep }) : payload, keep ? [keep] : [], true);
+  }
+}
+// 下載一組檔案放進 AI 快取（顯示百分比）
+async function aiDownload(list, label) {
+  const total = list.reduce((a, f) => a + f[2], 0);
   let got = 0;
-  busy('下載 AI 資料中… 0%');
+  busy(`${label} 0%`);
   try {
     const cache = 'caches' in window ? await caches.open(AI_CACHE) : null;
-    for (const [f, type] of AI_FILES) {
+    for (const [f, type] of list) {
       const res = await fetch(f, { cache: 'no-store' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const rd = res.body.getReader(), parts = [];
       for (;;) {
         const { done, value } = await rd.read(); if (done) break;
         parts.push(value); got += value.length;
-        $('#busyMsg').textContent = `下載 AI 資料中… ${Math.min(99, Math.round((got / total) * 100))}%`;
+        $('#busyMsg').textContent = `${label} ${Math.min(99, Math.round((got / total) * 100))}%`;
       }
       if (cache) await cache.put(new URL(f, location.href).href, new Response(new Blob(parts, { type }), { headers: { 'Content-Type': type } }));
     }
@@ -3200,6 +3275,29 @@ async function aiEnsure(inApp, noAsk) {
     toast('下載失敗，請確認網路後再試一次');
     return false;
   }
+}
+async function aiDropOld() {
+  try { const c = await caches.open(AI_CACHE); for (const [f] of AI_OLD) await c.delete(new URL(f, location.href).href); } catch (_) {}
+}
+const AI_DL_MB = mbOf([AI_MODEL, ...AI_NEW]), AI_UP_MB = mbOf(AI_NEW);
+async function aiEnsure(inApp, noAsk) {
+  if (await aiCached()) return true;
+  const ask = `AI 框選需要先下載約 ${AI_DL_MB} MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？`;
+  if (!noAsk && (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask))) return false; // 2.1：noAsk＝已經在預設開啟的詢問裡問過
+  const st = await aiState();
+  const need = [...(st.model ? [] : [AI_MODEL]), ...AI_NEW];
+  if (!(await aiDownload(need, '下載 AI 資料中…'))) return false;
+  settings.aiForceOld = false; settings.aiBenchV = null; saveSettings();
+  await aiDropOld(); aiReset();
+  return true;
+}
+// 舊使用者升級成新引擎（拍攝畫面的詢問、設定裡的按鈕）
+async function aiUpgrade() {
+  if (!(await aiDownload(AI_NEW, '升級 AI 引擎中…'))) return false;
+  settings.aiForceOld = false; settings.aiBenchV = null; settings.aiUpAsked = true; saveSettings();
+  await aiDropOld(); aiReset();
+  aiInit().catch(() => {}); // 載入新引擎並在背景比較 CPU／GPU
+  return true;
 }
 // 一張圖 → { corners } 或 { reject }
 async function aiFrame(img) {
@@ -3293,7 +3391,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '2.2';
+const APP_VER = '3.0';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3311,6 +3409,11 @@ const CHANGELOG = [
   ] },
   { v: 'v2', items: [
     { t: '正式版上線 🎉', since: '2.0.1' },
+  ] },
+  { v: 'v3', items: [
+    { t: 'AI框選全面加速：新的AI引擎會運用 GPU 提升框選速度', since: '3.0' },
+    { t: '自動 AI 框選預設開啟，並於第一次拍攝時詢問下載', since: '3.0' },
+    { t: '加入主畫面說明，並新增影片教學', since: '3.0' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
