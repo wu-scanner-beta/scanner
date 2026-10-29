@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI 測速（WebGPU）</title>
+<style>
+  :root{--bg:#F6EFE6;--card:#FFFCF8;--cocoa:#4A2F22;--text:#3A281E;--muted:#8A6E5A;--ok:#4E7D4A;--bad:#B5432E;--line:#E6D8C8}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"PingFang TC","Noto Sans TC",sans-serif;padding:20px 16px 40px}
+  h1{font-size:21px;margin:4px 0 4px}
+  .sub{color:var(--muted);font-size:14px;margin:0 0 16px;line-height:1.6}
+  button{width:100%;padding:15px;border:0;border-radius:14px;background:var(--cocoa);color:#fff;font-size:17px;font-weight:700}
+  button:disabled{opacity:.45}
+  #out{margin-top:16px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 14px 10px;font-size:15px;line-height:1.7;display:none}
+  .row{display:flex;justify-content:space-between;gap:10px;border-bottom:1px dashed var(--line);padding:6px 0}
+  .row:last-child{border-bottom:0}
+  .row b{font-weight:700}
+  .k{color:var(--muted)}
+  .big{font-size:20px;font-weight:800;text-align:center;padding:10px 0 6px}
+  .ok{color:var(--ok)} .bad{color:var(--bad)}
+  #log{margin-top:12px;font-size:12.5px;color:var(--muted);white-space:pre-wrap;word-break:break-all}
+  .note{font-size:12.5px;color:var(--muted);margin-top:14px;line-height:1.6}
+</style>
+</head>
+<body>
+<h1>AI 框選測速（WebGPU）</h1>
+<p class="sub">比較同一個 AI 模型用 CPU 和 GPU（WebGPU）執行的速度。只做測試，不會存任何資料，也不會開相機。第一次會下載約 32 MB，建議用 Wi-Fi。</p>
+<button id="go">開始測速</button>
+<div id="out"></div>
+<div id="log"></div>
+<p class="note">伍線譜樂譜掃描・測試頁　ONNX Runtime Web 1.30.0（MIT）・U²-Net u2netp（Apache 2.0）</p>
+
+<script src="gpu-test/ort.webgpu.min.js"></script>
+<script>
+const RUNS = 5, N = 320 * 320;
+const MEAN = [0.485, 0.456, 0.406], STD = [0.229, 0.224, 0.225]; // 與 App 的 ai-worker.js 相同的前處理
+const $ = (s) => document.querySelector(s);
+const log = (m) => { $('#log').textContent += m + '\n'; };
+const row = (k, v, cls) => `<div class="row"><span class="k">${k}</span><b class="${cls || ''}">${v}</b></div>`;
+const ms = (x) => (x >= 1000 ? (x / 1000).toFixed(2) + ' 秒' : Math.round(x) + ' ms');
+
+ort.env.wasm.wasmPaths = new URL('gpu-test/', location.href).href; // 要用完整網址，相對路徑會被當成模組名稱
+ort.env.wasm.numThreads = 1; // GitHub Pages 不能開跨來源隔離，只能單執行緒（App 也一樣）
+
+function loadImg(src) { return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; }); }
+async function makeInput() {
+  const img = await loadImg('gpu-test/sample.jpg');
+  const c = document.createElement('canvas'); c.width = c.height = 320;
+  const x = c.getContext('2d'); x.drawImage(img, 0, 0, 320, 320);
+  const d = x.getImageData(0, 0, 320, 320).data;
+  let mx = 1; for (let i = 0; i < d.length; i += 4) mx = Math.max(mx, d[i], d[i + 1], d[i + 2]);
+  const f = new Float32Array(3 * N);
+  for (let i = 0; i < N; i++) for (let k = 0; k < 3; k++) f[k * N + i] = (d[i * 4 + k] / mx - MEAN[k]) / STD[k];
+  return f;
+}
+function toMask(out) {
+  let lo = Infinity, hi = -Infinity; for (let i = 0; i < N; i++) { lo = Math.min(lo, out[i]); hi = Math.max(hi, out[i]); }
+  const m = new Uint8Array(N), k = hi > lo ? 255 / (hi - lo) : 0;
+  for (let i = 0; i < N; i++) m[i] = Math.round((out[i] - lo) * k);
+  return m;
+}
+async function bench(ep, input) {
+  const t0 = performance.now();
+  const s = await ort.InferenceSession.create('lib/ai/u2netp.onnx', { executionProviders: [ep], graphOptimizationLevel: 'all' });
+  const load = performance.now() - t0;
+  const feed = () => ({ [s.inputNames[0]]: new ort.Tensor('float32', input.slice(), [1, 3, 320, 320]) });
+  const times = []; let out = null;
+  for (let r = 0; r < RUNS; r++) {
+    const a = performance.now();
+    const o = await s.run(feed());
+    const data = await o[s.outputNames[0]].getData(); // GPU 的結果要讀回來才算完成
+    times.push(performance.now() - a);
+    if (r === 0) out = data;
+    log(`${ep} 第 ${r + 1} 次：${ms(times[r])}`);
+  }
+  try { await s.release(); } catch (_) {}
+  const rest = times.slice(1);
+  return { load, first: times[0], avg: rest.reduce((p, q) => p + q, 0) / rest.length, mask: toMask(out) };
+}
+function compare(a, b) {
+  let maxd = 0, inter = 0, uni = 0;
+  for (let i = 0; i < N; i++) {
+    maxd = Math.max(maxd, Math.abs(a[i] - b[i]));
+    const x = a[i] >= 128, y = b[i] >= 128; if (x && y) inter++; if (x || y) uni++;
+  }
+  return { maxd, iou: uni ? inter / uni : 1 };
+}
+
+$('#go').onclick = async () => {
+  $('#go').disabled = true; $('#go').textContent = '測速中，請稍候…';
+  $('#log').textContent = ''; const out = $('#out'); out.style.display = 'block'; out.innerHTML = '';
+  let html = '';
+  const ua = navigator.userAgent;
+  html += row('瀏覽器', /iPhone|iPad|Macintosh/.test(ua) && /Safari/.test(ua) && !/CriOS|Chrome/.test(ua) ? 'Safari' : (/Chrome\/(\d+)/.exec(ua) ? 'Chrome ' + /Chrome\/(\d+)/.exec(ua)[1] : '其他'));
+  let gpuOk = false, gpuName = '';
+  try {
+    if (navigator.gpu) {
+      const ad = await navigator.gpu.requestAdapter();
+      if (ad) { gpuOk = true; const inf = ad.info || {}; gpuName = [inf.vendor, inf.architecture, inf.device].filter(Boolean).join(' ') || '可用'; }
+    }
+  } catch (e) { log('WebGPU 檢查錯誤：' + e.message); }
+  html += row('WebGPU', gpuOk ? '支援（' + gpuName + '）' : '不支援', gpuOk ? 'ok' : 'bad');
+  out.innerHTML = html;
+  try {
+    const input = await makeInput();
+    log('CPU 測速中…');
+    const c = await bench('wasm', input);
+    html += row('CPU 載入模型', ms(c.load)) + row('CPU 第一次', ms(c.first)) + row('CPU 平均（第 2～5 次）', ms(c.avg));
+    out.innerHTML = html;
+    if (gpuOk) {
+      log('GPU 測速中…');
+      try {
+        const g = await bench('webgpu', input);
+        const cmp = compare(c.mask, g.mask);
+        const x = c.avg / g.avg;
+        html += row('GPU 載入模型', ms(g.load)) + row('GPU 第一次', ms(g.first)) + row('GPU 平均（第 2～5 次）', ms(g.avg));
+        html += row('結果一致性', (cmp.iou * 100).toFixed(1) + '%（差異最大 ' + cmp.maxd + '）', cmp.iou > 0.98 ? 'ok' : 'bad');
+        html += `<div class="big ${x >= 1 ? 'ok' : 'bad'}">GPU 比 CPU ${x >= 1 ? '快 ' + x.toFixed(1) + ' 倍' : '慢 ' + (1 / x).toFixed(1) + ' 倍'}</div>`;
+      } catch (e) {
+        html += row('GPU', '執行失敗：' + e.message, 'bad'); log(String(e && e.stack || e));
+      }
+    } else {
+      html += row('GPU', '不支援，略過');
+    }
+  } catch (e) {
+    html += row('錯誤', e.message, 'bad'); log(String(e && e.stack || e));
+  }
+  html += row('測試時間', new Date().toLocaleString('zh-TW'));
+  out.innerHTML = html;
+  $('#go').disabled = false; $('#go').textContent = '再測一次';
+};
+</script>
+</body>
+</html>

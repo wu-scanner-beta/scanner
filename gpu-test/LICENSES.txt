@@ -1,0 +1,8 @@
+WebGPU 測速頁使用的第三方檔案
+
+ort.webgpu.min.js、ort-wasm-simd-threaded.asyncify.mjs、ort-wasm-simd-threaded.asyncify.wasm
+  ONNX Runtime Web 1.30.0（Microsoft） — MIT License
+  https://github.com/microsoft/onnxruntime
+
+測試圖 sample.jpg：伍祐恆拍攝。
+AI 模型使用網站上的 lib/ai/u2netp.onnx（U²-Net，Apache License 2.0）。
