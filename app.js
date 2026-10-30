@@ -725,7 +725,7 @@ async function startLive(docId) {
   Object.assign(live, {
     running: true, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
-    aiLater: [], lastRes: null, lastPageId: null,
+    aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false,
   });
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
@@ -1205,6 +1205,17 @@ async function capture(sig, full, quadAt, userPress) {
   const fxFrame = fxOn ? fxGrab(full || v) : null;
   let fx = null;
   const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop); };
+  // 3.1.4：稍後裁切有動畫時，存照片（12 MP 轉 JPEG）、精算四角、存資料庫這些重活等紙飛進縮圖後才做。
+  // 作者錄影：動畫在掃描光那段一頓一頓、飛進縮圖幾乎跳過——這些工作在主畫面執行，把動畫卡住。
+  // 等待期間按「完成」或切到背景：先把動畫收掉，等這張存好再結束（finishLive）
+  let defRes = null, defT0 = 0;
+  const deferSave = async () => {
+    if (!fx || now2crop) return;
+    defT0 = live.lastCapT = Date.now(); // 換頁判斷的 2 秒從拍下那一刻算，不因為晚存而拖慢連拍
+    live.deferring = true; live.deferDone = new Promise((r) => { defRes = r; });
+    await fx.landed;
+  };
+  const endDefer = () => { if (defRes) { live.deferring = false; const r = defRes; defRes = null; r(); } };
   try {
     let blob = null, fromPhoto = false, src = null, thumbFrame = null;
     if (live.ic && !full) {
@@ -1224,6 +1235,7 @@ async function capture(sig, full, quadAt, userPress) {
       flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); // 這一格已經固定下來，手可以移開了
       setHint('已拍好，請換下一頁', true);
       live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; // 立刻隱藏框
+      await deferSave();
       // 1.33：iPhone 省記憶體檔：存檔前縮到上限以內
       const cap = photoCap();
       if (src.width * src.height > cap * 1.05) {
@@ -1238,9 +1250,9 @@ async function capture(sig, full, quadAt, userPress) {
       noteStrain();
       if (!blob) { // 1.29：弱手機記憶體不足時轉檔會失敗，不要存成沒有照片的頁面
         toast('這張沒拍成功，請再拍一次'); shotFx(''); if (fx) fx.stop();
-        live.armed = true; resetLock(); live.capturing = false; return;
+        live.armed = true; resetLock(); live.capturing = false; endDefer(); return;
       }
-    } else { flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; }
+    } else { flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; await deferSave(); }
     let corners = quad ? quad.map((p) => p.slice()) : FULL.map((p) => p.slice());
     // 用較高解析度重新精算四個角（只在結果相近時採用，避免抓錯）
     try {
@@ -1274,6 +1286,7 @@ async function capture(sig, full, quadAt, userPress) {
     if (!live.docId) live.docId = (await createDoc()).id;
     const page = await addPage(live.docId, blob, corners, null, needUser, capRot);
     live.count++;
+    endDefer();
     const th = $('#liveThumb');
     // 3.1：有拍攝動畫（稍後裁切）時，等紙飛進縮圖才顯示張數、跳一下
     const showCount = (n) => { th.style.visibility = 'visible'; th.querySelector('span').textContent = n; bumpThumb(); };
@@ -1283,7 +1296,7 @@ async function capture(sig, full, quadAt, userPress) {
     if (!live.thumbUrl) th.querySelector('img').src = blobUrl('live:last', blob, page.id);
     if (thumbFrame) setLiveThumb(thumbFrame, corners, null, page.id, capRot); else refreshLiveThumb(page.id);
     updResChip();
-    live.lastCapT = Date.now(); live.miss = 0; live.best = null;
+    live.lastCapT = defT0 || Date.now(); live.miss = 0; live.best = null;
     if (!quad) { live.armed = true; resetLock(); }
     if (now2crop) {
       // 3.1：立即裁切＝每拍一張就進框選（1.19～3.0 只有手動拍攝、或框沒穩就自己按快門的才進）
@@ -1305,7 +1318,7 @@ async function capture(sig, full, quadAt, userPress) {
     // 1.29：不進裁切畫面的頁：iPhone 邊拍邊在背景跑 AI；Android 等按「完成」再一次跑（避免弱手機拍攝變卡）
     if (settings.autoAI) { if (IS_IOS) aiBg(page.id, blob, corners, live.count); else live.aiLater.push(page.id); }
   } catch (e) {
-    console.error(e); shotFx(''); if (fx) fx.stop(); toast('拍攝失敗：' + e.message);
+    console.error(e); shotFx(''); if (fx) fx.stop(); endDefer(); toast('拍攝失敗：' + e.message);
     live.armed = true; resetLock();
   }
   live.capturing = false;
@@ -1624,6 +1637,12 @@ $('#torchBtn').onclick = async () => {
   catch (_) { toast('無法開啟閃光燈'); }
 };
 function finishLive() {
+  // 3.1.4：最後一張還在等動畫結束才存：收掉動畫、等它存好再結束
+  if (live.deferring && live.deferDone) {
+    if (capFx.cur) capFx.cur.stop();
+    if (!live.finishing) { live.finishing = true; live.deferDone.then(() => { live.finishing = false; finishLive(); }); }
+    return;
+  }
   const docId = live.docId, count = live.count;
   const later = (live.aiLater || []).slice(); live.aiLater = [];
   stopLive();
@@ -3801,7 +3820,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '3.1.3';
+const APP_VER = '3.1.4';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
