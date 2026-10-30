@@ -373,6 +373,25 @@ input[type=file]{display:none}
 @keyframes okpop{0%{opacity:0;transform:translate(-50%,-50%) scale(.6)}15%{opacity:1;transform:translate(-50%,-50%) scale(1.08)}25%{transform:translate(-50%,-50%) scale(1)}80%{opacity:1}100%{opacity:0;transform:translate(-50%,-50%) scale(1)}}
 #liveThumb.bump{animation:bump .45s ease-out}
 @keyframes bump{0%{transform:scale(1)}35%{transform:scale(1.22)}100%{transform:scale(1)}}
+/* 3.1 拍攝動畫：#capFx 蓋在整個畫面上（不擋點擊），座標用畫面座標；紙張用 matrix3d 從斜的四邊形拉成正面 */
+#capFx{position:fixed;inset:0;z-index:40;pointer-events:none;display:none;overflow:hidden}
+#capFx.on{display:block}
+#capFx .cf-dim{position:absolute;inset:0;background:#000;opacity:0}
+#capFx .cf-pw{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:0 0}
+#capFx canvas{position:absolute;left:0;top:0;transform-origin:0 0}
+#capFx .cf-clip,#capRes .cr-clip{position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden}
+.cf-band{position:absolute;left:0;top:0;width:0;height:0;pointer-events:none;display:none;
+  background:linear-gradient(180deg,rgba(217,150,40,0) 0%,rgba(217,150,40,.28) 55%,rgba(250,204,90,.55) 88%,rgba(255,255,255,.95) 97%,rgba(250,204,90,.9) 100%);box-shadow:0 4px 14px 2px rgba(250,204,90,.75)}
+#capRes{position:fixed;inset:0;z-index:45;background:#1C130E;display:none;flex-direction:column;padding:calc(var(--st) + 8px) 0 calc(var(--sb) + 12px)}
+#capRes.on{display:flex}
+#capRes .cr-top{color:#fff;text-align:center;font-size:16px;font-weight:700;padding:8px 0 4px}
+#capRes .cr-stage{position:relative;flex:1;overflow:hidden}
+#capRes .cr-pw{position:absolute;left:0;top:0;transform-origin:0 0}
+#capRes canvas{position:absolute;left:0;top:0;width:100%;height:100%;box-shadow:0 6px 24px rgba(0,0,0,.45)}
+#capRes .cr-spin{position:absolute;inset:0;display:none;place-items:center}
+#capRes .cr-spin.on{display:grid}
+#capRes .cr-bar{display:flex;gap:12px;padding:10px 20px 0}
+#capRes .cr-bar .bigbtn{margin-top:0}
 .sponsor-empty{font-size:15px;color:var(--muted);padding:6px 4px;line-height:1.7}
 /* 使用教學 */
 .help h4{font-size:15.5px;color:var(--cocoa-d);margin:16px 4px 6px}
@@ -847,6 +866,11 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   </div>
 </div>
 <div id="undoBar"><span></span><button id="undoBtn">還原</button></div>
+<!-- 3.1 拍攝動畫（即時掃描：拉平 → 金色掃描光 → 飛進縮圖） -->
+<div id="capFx"><div class="cf-dim"></div><div class="cf-pw"><canvas class="cf-paper"></canvas><div class="cf-clip"><canvas class="cf-scan"></canvas></div><div class="cf-band"></div></div></div>
+<!-- 3.1 立即裁切：按確定後先看成品 -->
+<div id="capRes"><div class="cr-top">成品</div><div class="cr-stage"><div class="cr-pw"><canvas class="cr-base"></canvas><div class="cr-clip"><canvas class="cr-out"></canvas></div><div class="cf-band cr-band"></div></div><div class="cr-spin"><div class="spin"></div></div></div>
+<div class="cr-bar"><button class="bigbtn alt" id="crEdit">繼續編輯</button><button class="bigbtn" id="crOk">確定</button></div></div>
 <div id="busy"><div class="box"><div class="spin"></div><div id="busyMsg">處理中…</div></div></div>
 <div id="toast"></div>
 <input type="file" id="fileCamera" accept="image/*" capture="environment">
