@@ -642,22 +642,40 @@ async function finishBurst() {
 }
 $('#burstDone').onclick = finishBurst;
 
+// 3.0.1：高畫質拍照、相簿匯入也跟著「自動 AI 框選」開關（開著而且 AI 已下載才用）。
+// 回傳 { corners, curve }；AI 判斷不適合或失敗回傳 { fail, msg }（呼叫的地方保留一般偵測的框）
+async function aiAutoOn() { return !!settings.autoAI && (await aiCached()); }
+async function aiCorners(blob) {
+  try {
+    const { img, url } = await loadImg(blob);
+    let r = null;
+    try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); }
+    if (!r || !r.corners) return { fail: 'reject', msg: r && r.reject };
+    return { corners: r.corners, curve: r.curve ? normCurve(r.corners, r.curve) : null };
+  } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
+}
 $('#fileCamera').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
   busy('偵測文件邊框…');
-  let blob, corners;
+  let blob, corners, curve = null;
   try { blob = await stableBlob(file); corners = await detectBlob(blob); }
   catch (err) { unbusy(); toast(err.message); return; }
+  if (await aiAutoOn()) {
+    busy('AI 框選中…');
+    const r = await aiCorners(blob);
+    if (r.corners) { corners = r.corners; curve = r.curve; }
+    else toast(r.fail === 'reject' ? 'AI 判斷不適合，保留原框' : 'AI 框選失敗：' + (r.msg || '未知原因'));
+  }
   unbusy();
   if (settings.confirmCrop) {
     openCrop({
-      blob, corners, retake: true, burst: true,
+      blob, corners, curve, retake: true, burst: true,
       onConfirm: async (c, cv, edited) => { const pg = await burstAdd(blob, c, cv); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
       onRetake: () => openCamera(),
     });
   } else {
-    await burstAdd(blob, corners);
+    await burstAdd(blob, corners, curve);
     toBurst();
     toast(`已加入第 ${burst.count} 張`);
   }
@@ -668,16 +686,24 @@ $('#fileGallery').addEventListener('change', async (e) => {
   if (!files.length) return;
   let docId = cameraTarget;
   if (!docId) docId = (await createDoc()).id;
+  const useAI = await aiAutoOn();
+  let rejected = 0, aiErr = null;
   for (let i = 0; i < files.length; i++) {
-    busy(`匯入中 ${i + 1} / ${files.length}`);
+    busy(`${useAI ? 'AI 框選中' : '匯入中'} ${i + 1} / ${files.length}`);
     try {
       const blob = await stableBlob(files[i]);
-      const c = await detectBlob(blob);
-      await addPage(docId, blob, c);
+      let c = await detectBlob(blob), cv = null;
+      if (useAI) {
+        const r = await aiCorners(blob);
+        if (r.corners) { c = r.corners; cv = r.curve; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
+      }
+      await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
   }
   unbusy();
   openDoc(docId, current !== 'doc');
+  if (aiErr) toast('AI 框選失敗：' + aiErr);
+  else if (rejected) toast(files.length === 1 ? 'AI 判斷不適合，保留原框' : `${rejected} 張 AI 判斷不適合，保留原框`);
 });
 
 /* ---------- 即時掃描 ---------- */
@@ -1693,16 +1719,32 @@ function layoutCrop() {
   const s = Math.min((st.width - pad * 2) / nw, (st.height - pad * 2) / nh);
   const w = nw * s, h = nh * s, x = (st.width - w) / 2;
   const y = (st.height - h) / 2; // 置中（1.13 曾下移 40 點，1.14 預覽改到對角後改回置中）
-  cropCtx.rect = { x, y, w, h };
+  cropCtx.base = { x, y, w, h }; // 沒有縮放時的位置（3.0.1 雙指縮放：版面改變時恢復原尺寸）
+  cropCtx.zs = 1;
+  placeCrop({ x, y, w, h });
+  pipPlace(false);
+}
+// 把照片、外框、控制點放到 r（裁切區座標）；縮放時控制點大小不變，所以放大後更好點準
+function placeCrop(r) {
+  cropCtx.rect = r;
   const ci = $('#cropImg');
-  Object.assign(ci.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
+  Object.assign(ci.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' });
   for (const id of ['#cropSvg', '#cropHandles']) {
     const svg = $(id);
-    Object.assign(svg.style, { left: x + 'px', top: y + 'px', width: w + 'px', height: h + 'px' });
-    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    Object.assign(svg.style, { left: r.x + 'px', top: r.y + 'px', width: r.w + 'px', height: r.h + 'px' });
+    svg.setAttribute('viewBox', `0 0 ${r.w} ${r.h}`);
   }
-  pipPlace(false);
   drawCrop();
+}
+// 縮放 s 倍（1～4），讓照片上的 (u, v)（0～1）落在裁切區的 (mx, my)；放大後照片不會被拖到留出大片空白
+function zoomCrop(s, u, v, mx, my) {
+  const b = cropCtx.base, st = $('#cropStage').getBoundingClientRect(), pad = 26;
+  s = Math.min(4, Math.max(1, s));
+  if (s < 1.02) { cropCtx.zs = 1; placeCrop({ ...b }); return; }
+  const w = b.w * s, h = b.h * s;
+  const fit = (pos, size, view) => (size + pad * 2 <= view ? (view - size) / 2 : Math.min(pad, Math.max(view - size - pad, pos)));
+  cropCtx.zs = s;
+  placeCrop({ x: fit(mx - u * w, w, st.width), y: fit(my - v * h, h, st.height), w, h });
 }
 // 邊的中點（畫面座標）：有彎度時取曲線上的中點
 function edgeMid(i, w, h) {
@@ -1798,8 +1840,36 @@ function drawCrop() {
   const stage = $('#cropStage');
   const clamp = (v) => Math.min(1, Math.max(0, v));
   const local = (e) => { const b = stage.getBoundingClientRect(); return [e.clientX - b.left - cropCtx.rect.x, e.clientY - b.top - cropCtx.rect.y]; };
+  // 3.0.1 雙指縮放：兩指捏合放大縮小並平移；放大後單指按在沒有控制點的地方可以平移；在空白處點兩下恢復原尺寸。
+  // 第二指放下時，取消第一指正在拖的控制點（回到拖之前），避免縮放時順便把角拖走
+  const ptrs = new Map();
+  let pinch = null, pan = null, lastEmptyTap = 0;
+  const inStage = (x, y) => { const b = stage.getBoundingClientRect(); return [x - b.left, y - b.top]; };
+  const cancelDrag = () => {
+    const g = cropCtx.drag; if (!g) return;
+    cropCtx.corners = g.c0.map((p) => p.slice());
+    cropCtx.curve = g.k0 ? g.k0.map((k) => k.map((p) => p.slice())) : null;
+    cropCtx.drag = null; $('#loupe').style.display = 'none';
+    pipRequest(true); pipHideSoon(); drawCrop();
+  };
+  const startPinch = () => {
+    const [a, b] = [...ptrs.values()].map((p) => inStage(p[0], p[1]));
+    const r = cropCtx.rect, m = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    pinch = { d0: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, s0: cropCtx.zs, u: (m[0] - r.x) / r.w, v: (m[1] - r.y) / r.h };
+    pan = null;
+  };
+  const showLoupe = (lx, ly) => { if (cropCtx.zs < 2.5) loupe(lx, ly); else $('#loupe').style.display = 'none'; }; // 放大很多時不需要放大鏡
   stage.addEventListener('pointerdown', (e) => {
-    if (!cropCtx || cropCtx.drag) return;
+    if (!cropCtx) return;
+    ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    if (ptrs.size >= 2) {
+      cancelDrag();
+      if (ptrs.size === 2) startPinch();
+      try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+      e.preventDefault();
+      return;
+    }
+    if (pinch || cropCtx.drag) return;
     if (e.target.closest('#pipFull')) { pipFullClose(); return; }
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
@@ -1832,7 +1902,17 @@ function drawCrop() {
     }
     if (!best) {
       // 沒按到控制點：按在小視窗上就是移動或點開小視窗
-      if (e.target.closest('#pip') && $('#pip').classList.contains('vis')) { e.preventDefault(); pipFullOpen(); }
+      if (e.target.closest('#pip') && $('#pip').classList.contains('vis')) { e.preventDefault(); pipFullOpen(); return; }
+      // 空白處：點兩下恢復原尺寸；放大時按住可以平移
+      const now = Date.now();
+      if (cropCtx.zs > 1 && now - lastEmptyTap < 320) { lastEmptyTap = 0; zoomCrop(1); return; }
+      lastEmptyTap = now;
+      if (cropCtx.zs > 1) {
+        const r = cropCtx.rect;
+        pan = { id: e.pointerId, start: [e.clientX, e.clientY], r0: { ...r } };
+        try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+        e.preventDefault();
+      }
       return;
     }
     best.start = [lx, ly];
@@ -1842,10 +1922,26 @@ function drawCrop() {
     cropCtx.drag = best;
     stage.setPointerCapture(e.pointerId);
     e.preventDefault();
-    drawCrop(); loupe(lx, ly);
+    drawCrop(); showLoupe(lx, ly);
   });
   stage.addEventListener('pointermove', (e) => {
-    const g = cropCtx && cropCtx.drag;
+    if (!cropCtx) return;
+    if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pinch) {
+      if (ptrs.size < 2) return;
+      const [a, b] = [...ptrs.values()].slice(0, 2).map((p) => inStage(p[0], p[1]));
+      const d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+      zoomCrop(pinch.s0 * d / pinch.d0, pinch.u, pinch.v, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+      return;
+    }
+    if (pan) {
+      if (e.pointerId !== pan.id) return;
+      // 平移＝縮放倍數不變、照片跟著手指移動（照片左上角＝裁切區的 (0,0) 往回推）
+      const r0 = pan.r0, nx = r0.x + e.clientX - pan.start[0], ny = r0.y + e.clientY - pan.start[1];
+      zoomCrop(cropCtx.zs, -nx / r0.w, -ny / r0.h, 0, 0);
+      return;
+    }
+    const g = cropCtx.drag;
     if (!g) return;
     const [lx, ly] = local(e);
     const { w, h } = cropCtx.rect;
@@ -1896,12 +1992,15 @@ function drawCrop() {
         }
       }
     }
-    drawCrop(); loupe(lx, ly);
+    drawCrop(); showLoupe(lx, ly);
     pipAvoid(lx + cropCtx.rect.x, ly + cropCtx.rect.y);
   });
   let lastRope = null; // 1.28：曲線模式點兩下某條邊＝把那條邊拉直
   const end = (e) => {
+    ptrs.delete(e.pointerId);
     if (!cropCtx) return;
+    if (pinch) { if (ptrs.size < 2) pinch = null; return; } // 捏合結束：剩下的手指不接著拖或平移
+    if (pan) { if (e.pointerId === pan.id) pan = null; return; }
     const g = cropCtx.drag, was = !!g;
     if (g && g.type === 'rope' && e.type === 'pointerup') {
       const [lx, ly] = local(e), now = Date.now();
@@ -1919,6 +2018,7 @@ function drawCrop() {
   window.ropePoint = (g) => { const C = cropCtx.corners, k = cropCtx.curve[g.i]; return edgePoint(C[g.i], k, C[(g.i + 1) % 4], g.s); };
   stage.addEventListener('pointerup', end);
   stage.addEventListener('pointercancel', end);
+  for (const t of ['pointerup', 'pointercancel']) window.addEventListener(t, (e) => { if (ptrs.has(e.pointerId) && !stage.contains(e.target)) end(e); }); // 在裁切區外放開的手指也要清掉
 
   // 放大鏡：顯示正在拖的點附近，直接畫出裁切邊、框外變暗；跟著手指，顯示在手指上方
   function loupe(fx, fy) {
@@ -2263,7 +2363,7 @@ function addSheet() {
     s.querySelectorAll('.srow').forEach((b) => b.onclick = () => { closeSheet(); startSource(b.dataset.s, state.docId); });
   });
 }
-$('#docAdd').onclick = addSheet;
+$('#docAi').onclick = () => aiFrameDoc(); // 3.0.1：原本的「新增頁面」（頁面列最後的＋已有）換成 AI 框選
 $('#docBack').onclick = () => history.back();
 $('#docTitle').onclick = renameDoc;
 // 改名（1.12 起不用瀏覽器內建對話框，改成底部輸入畫面，才能全選、有清除鈕）
@@ -2297,10 +2397,10 @@ $('#docMore').onclick = () => openSheet(`<h3>文件</h3>
     history.back();
   };
 });
-$('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><button class="srow" data-ai="1">${ICON.ai}<span>AI 框選<span class="sub">用 AI 重新找出每一頁的紙張範圍</span></span></button><div class="note" style="margin:4px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
+$('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><div class="note" style="margin:4px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
   s.querySelectorAll('.srow').forEach((b) => b.onclick = async () => {
     closeSheet();
-    if (b.dataset.ai) aiFrameDoc(); else openDocAdjust(b.dataset.m);
+    openDocAdjust(b.dataset.m);
   });
 });
 // 統一調整：全部頁面改成這個模式，再進入調整畫面（預覽第一頁，可左右切換預覽的頁面）
@@ -3002,6 +3102,8 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setMode">${MODES.map((m) => `<button data-k="${m.id}" class="${settings.mode === m.id ? 'on' : ''}">${m.name}</button>`).join('')}</div>
     <div class="switch"><span>即時掃描自動拍攝<small>文件穩定約 1 秒後自動按快門</small></span><button class="tg ${settings.autoShutter ? 'on' : ''}" data-k="autoShutter"></button></div>
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
+    <div class="switch"><span>✨ 自動 AI 框選<small id="aiStat">即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選紙張</small></span><button class="tg ${settings.autoAI ? 'on' : ''}" id="setAuto"></button></div>
+    <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
     ${IS_IOS
     ? '<div class="note" style="margin:10px 2px 4px">橫拿拍攝：請關閉螢幕方向鎖定，直接橫拿就可以拍。</div>'
     : !hasMotion() ? '' : `<div class="switch"><span>橫拿拍攝<small>橫拿時按鈕跟著轉、拍好的頁自動轉正</small></span><button class="tg ${settings.landscape !== false ? 'on' : ''}" data-k="landscape"></button></div>`}
@@ -3011,17 +3113,41 @@ $('#btnSettings').onclick = () => {
     <div class="seg" id="setCam">${[['auto', '自動'], ['high', '高畫質'], ['low', '省記憶體']].map(([k, n]) => `<button data-k="${k}" class="${(settings.camQ || 'auto') === k ? 'on' : ''}">${n}</button>`).join('')}</div>
     ${IS_IOS ? '<button class="srow" id="setCamPerm" style="margin-top:6px"><span>📷 每次都要允許相機？ ›<span class="sub">設定成永遠允許，開即時掃描就不用每次按</span></span></button>' : ''}
     <button class="srow" id="setDefAdj" style="margin-top:6px"><span>預設調整數值 ›<span class="sub">新文件一開始用的曝光、濃淡、銳利度等數值</span></span></button>
-    <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
     <button class="srow" id="setReport"><span>🐞 回報問題或建議 ›</span></button>
     <button class="srow" id="setLog"><span>更新日誌 ›<span class="sub">目前版本 v${APP_VER}</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
-    // 3.0：還在用舊 AI 引擎的人（按過「暫時不要」或還沒被問）才顯示，升級後消失
-    aiState().then((st) => { const b = s.querySelector('#setAiUp'); if (b && aiUpgradable(st)) b.style.display = ''; });
+    // 3.0：還在用舊 AI 引擎的人（按過「暫時不要」或還沒被問）才顯示，升級後消失（3.0.1 搬到自動 AI 框選開關下方）
+    // 3.0.1：自動 AI 框選開關（和拍攝畫面的 AI 按鈕同一個設定，整個 App 共用）；下面一行顯示 AI 資料的狀態。
+    // 還沒下載的人打開時詢問下載，下載完才算開啟；按「暫時不要」或下載失敗維持關閉
+    const aiStat = async () => {
+      const st = await aiState(), el = s.querySelector('#aiStat'), up = s.querySelector('#setAiUp');
+      if (!el) return;
+      const ok = st.model && aiPickEngine(st);
+      el.textContent = !ok ? `即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選。尚未下載 AI 資料（約 ${AI_DL_MB} MB），打開時會詢問下載`
+        : '即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選。AI 資料已下載，離線也能用';
+      if (up) up.style.display = aiUpgradable(st) ? '' : 'none';
+    };
+    aiStat();
     s.querySelector('#setAiUp').onclick = async () => {
-      if (await aiUpgrade()) { s.querySelector('#setAiUp').style.display = 'none'; toast('AI 引擎已升級'); }
+      if (await aiUpgrade()) { aiStat(); toast('AI 引擎已升級'); }
+    };
+    s.querySelector('#setAuto').onclick = async () => {
+      const b = s.querySelector('#setAuto');
+      if (settings.autoAI) {
+        settings.autoAI = false; settings.aiAsked = true; saveSettings(); b.classList.remove('on');
+        return;
+      }
+      if (await aiCached()) {
+        settings.autoAI = true; settings.aiAsked = true; saveSettings(); b.classList.add('on');
+        return;
+      }
+      const ok = await aiEnsure(true); // 詢問視窗會蓋掉設定畫面，結束後再打開設定
+      if (ok) { settings.autoAI = true; settings.aiAsked = true; saveSettings(); }
+      $('#btnSettings').onclick();
+      if (ok) toast('已開啟自動 AI 框選');
     };
     if (s.querySelector('#setCamPerm')) s.querySelector('#setCamPerm').onclick = () => camPermHelp();
     const camDesc = () => {
@@ -3048,7 +3174,7 @@ $('#btnSettings').onclick = () => {
       // 目前打開的文件立即更新，其他文件打開時才更新
       if (state.docId && (current === 'doc' || current === 'page')) getDocPages(state.docId).then(({ pages }) => ensureFresh(pages));
     });
-    s.querySelectorAll('.tg').forEach((b) => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on', settings[b.dataset.k]); });
+    s.querySelectorAll('.tg[data-k]').forEach((b) => b.onclick = () => { settings[b.dataset.k] = !settings[b.dataset.k]; saveSettings(); b.classList.toggle('on', settings[b.dataset.k]); });
     if (navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then((e) => {
       s.querySelector('#storeInfo').textContent = `已使用空間 ${(e.usage / 1048576).toFixed(0)} MB`;
     });
@@ -3086,11 +3212,11 @@ function openHelp() {
       <li>光線不足時，點左上角的 ⚡ 開燈。</li>
       <li>iPhone 每次都要按「允許」使用相機：到 iPhone 的「設定」→「App」→「Safari」→「相機」，改成「允許」。</li></ul>
     <h4>裁切</h4><ul>
-      <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。</li>
+      <li>拖四個角或拖邊來調整範圍，放大鏡能幫你對準。兩指捏合可以放大畫面，調得更精準；在空白處點兩下恢復原尺寸。</li>
       <li>書頁彎曲時切到「曲線」，抓住框線哪裡彎就往哪裡拉，存檔時會自動拉平；點兩下某條邊可以把它拉直。切回「直線」時彎度會保留，方便拖角或整條邊。</li>
       <li>拖動時，畫面的另一角會出現成品預覽，可以邊拉邊確認譜是不是平的；按下方的「成品」可以看大圖。</li>
-      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動貼合彎度。在「統一調整」裡按「AI 框選」，可以一次處理全部頁面。</li>
-      <li>即時掃描左上角的「AI」按鈕可以開啟「自動 AI 框選」：拍完自動用 AI 框好（iPhone 邊拍邊處理；Android 按「完成」後一次處理，立即裁切時先框好再進裁切畫面）。</li></ul>
+      <li>框得很不準時，按「AI 框選」讓 AI 重新找紙；書頁的上下邊有彎曲時，AI 會自動貼合彎度。文件頁下方的「✨ AI 框選」可以一次處理全部頁面。</li>
+      <li>即時掃描左上角的「AI」按鈕，或「設定」裡的開關，可以開啟「自動 AI 框選」：即時掃描、高畫質拍照、相簿匯入都會自動用 AI 框好（即時掃描時 iPhone 邊拍邊處理；Android 按「完成」後一次處理，立即裁切時先框好再進裁切畫面）。</li></ul>
     <h4>模式與調整</h4><ul>
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
       <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和原本的數值比較。</li>
@@ -3176,7 +3302,7 @@ function undoBar(msg, fn) {
    3.0：新引擎 ONNX Runtime Web 1.30.0（可用 GPU／WebGPU，約 32 MB；作者決定一律裝新的）。
      - 下載完在背景比較一次 CPU 與 GPU（aiBench），快的記在 settings.aiEP（iPhone 17 實測 GPU 快 4 倍多，Y31 GPU 反而慢）
      - 舊使用者（快取裡只有 1.17.3 舊引擎）：舊引擎照常可用；進拍攝畫面詢問一次升級（settings.aiUpAsked），
-       按「暫時不要」的在設定「預設調整數值」下方出現「有可升級的AI 引擎，點擊升級」，升級後消失
+       按「暫時不要」的在設定「自動 AI 框選」開關下方出現（3.0.1 前在「預設調整數值」下方）「有可升級的AI 引擎，點擊升級」，升級後消失
      - 安全網：新引擎載入失敗（ENGINE: 錯誤）→ settings.aiForceOld，下載舊引擎改用它；GPU 出錯由 ai-worker 自動改用 CPU */
 const AI_MODEL = ['lib/ai/u2netp.onnx', 'application/octet-stream', 4574861];
 const AI_NEW = [['lib/ai/ort.webgpu.min.js', 'text/javascript', 66417], ['lib/ai/ort-wasm-simd-threaded.asyncify.mjs', 'text/javascript', 53057], ['lib/ai/ort-wasm-simd-threaded.asyncify.wasm', 'application/wasm', 26781914]];
@@ -3390,8 +3516,8 @@ async function aiFrameDoc() {
 
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
-   日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次，新項目紅字 */
-const APP_VER = '3.0';
+   日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
+const APP_VER = '3.0.1';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3415,6 +3541,7 @@ const CHANGELOG = [
     { t: '最佳化 AI 書頁框選，攤開的書框得更準', since: '3.0' },
     { t: '自動 AI 框選預設開啟，並於第一次拍攝時詢問下載', since: '3.0' },
     { t: '加入主畫面說明，並新增影片教學', since: '3.0' },
+    { t: '框選畫面支援雙指縮放；相簿匯入與高畫質拍照也能自動 AI 框選', since: '3.0.1' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
@@ -3423,11 +3550,11 @@ const verGt = (a, b) => { const x = verNum(a), y = verNum(b); for (let i = 0; i 
 function logSeen() { try { return localStorage.getItem(LOG_KEY); } catch (_) { return null; } }
 function logMarkSeen() { try { localStorage.setItem(LOG_KEY, APP_VER); } catch (_) {} }
 // 1.29：只有「目前這一版」新增的項目是紅字；之前版本的一律黑字
-const isNewItem = (it) => it.since === APP_VER;
+const isNewItem = (it) => it.since === APP_VER; // 只用來判斷要不要自動跳出日誌（3.0.1 起不再標紅字，一律黑字）
 function showChangelog() {
   const seen = logSeen();
   const esc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-  $('#logList').innerHTML = CHANGELOG.map((g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div><ul>${g.items.map((it) => `<li${isNewItem(it) ? ' class="log-hl"' : ''}>${esc(it.t)}</li>`).join('')}</ul></div>`).join('');
+  $('#logList').innerHTML = CHANGELOG.map((g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div><ul>${g.items.map((it) => `<li>${esc(it.t)}</li>`).join('')}</ul></div>`).join('');
   $('#logCurrent').textContent = '目前版本 v' + APP_VER;
   logMarkSeen();
   openModal('logModal');
