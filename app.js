@@ -1460,11 +1460,8 @@ function liveResume() {
   if (!live.track || live.track.readyState === 'ended') { finishLive(); return; } // 中途被切到背景，相機已經關了
   // 1.20：iPhone 從裁切畫面回來時，相機畫面會用錯誤的大小重畫（縮成約四分之三、四周變黑）。
   // 把串流重新接上一次、並讓影片元素重新排版，強制以正確大小重畫
-  const v = $('#video'), st = live.stream;
-  v.style.display = 'none'; void v.offsetHeight; v.style.display = '';
-  v.srcObject = null; v.srcObject = st;
-  v.play().catch(() => {});
-  fixVideoSoon(); // 3.1.1：再補一次（剛回來時立刻重接，偶爾被還在收掉的畫面蓋過去）
+  freshVideo(); // 3.1.2：換新的影片元素（舊的做法是重接串流）
+  fixVideoSoon(); // 3.1.1：等畫面穩定再換一次（剛回來時，偶爾被還在收掉的畫面蓋過去）
   reapplyTorch();
   if (settings.autoShutter) setHint(live.armed ? '將文件放進畫面中' : '已拍好，請換下一頁', !live.armed);
   else hideHint();
@@ -1777,8 +1774,8 @@ function playCapFx(frame, quad, stay) {
     if (sp >= 1) {
       if (stay) {
         // 立即裁切：等 AI／偵測做完，掃描光循環
-        // 等 AI 時掃描光循環：每秒只重畫約 15 次，把運算讓給 AI（3.1.1）
-        if (!released) { if (!loop0) loop0 = now; placeBand(easeIO(((now - loop0) / 800) % 1)); raf = setTimeout(() => requestAnimationFrame(frameFn), 55); return; }
+        // 等 AI 時掃描光循環：每秒重畫約 40 次（3.1.1 是 15 次，作者覺得卡；弱 Android 已預設關動畫），讓一點運算給 AI
+        if (!released) { if (!loop0) loop0 = now; placeBand(easeIO(((now - loop0) / 800) % 1)); raf = setTimeout(() => frameFn(performance.now()), 25); return; }
         band.style.display = 'none'; resolveReady(); return; // 停在攤平的畫面，等進框選畫面後再 stop()
       }
       band.style.display = 'none';
@@ -1831,7 +1828,7 @@ function showCapResult(pageId) {
       const r0 = await job(f0, 'original', fillAdj('original'));
       if (done) return;
       drawTo(base, r0); capResLayout(r0.width / r0.height);
-      if (anim) { spin.classList.remove('on'); const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); raf = setTimeout(() => requestAnimationFrame(lp), 55); }; raf = requestAnimationFrame(lp); }
+      if (anim) { spin.classList.remove('on'); const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); raf = setTimeout(() => lp(performance.now()), 25); }; raf = requestAnimationFrame(lp); }
       const r = await job(f1, p.mode, pageAdjOf(p));
       if (done) return;
       cancelAnimationFrame(raf); clearTimeout(raf); drawTo(outC, r); spin.classList.remove('on');
@@ -1873,11 +1870,20 @@ function fixVideoSoon(ms) {
   clearTimeout(fixVT);
   fixVT = setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(() => {
     if (!live.running || current !== 'live' || !live.stream || live.track && live.track.readyState === 'ended') return;
-    const v = $('#video');
-    v.style.display = 'none'; void v.offsetHeight; v.style.display = '';
-    v.srcObject = null; v.srcObject = live.stream;
-    v.play().catch(() => {});
+    freshVideo();
   })), ms || 250);
+}
+/* 3.1.2：只重接串流不夠（作者：立即裁切＋自動 AI，編輯完回到相機還是縮小）。
+   改成換一個全新的 <video>（同 id、同屬性），iPhone 舊的影片圖層整個丟掉，用正確大小重新建立。
+   程式裡都是用 $('#video') 現找，換掉不影響其他地方 */
+function freshVideo() {
+  const old = $('#video'); if (!old || !live.stream) return;
+  const v = old.cloneNode(false);
+  v.muted = true; v.playsInline = true; v.autoplay = true;
+  v.onloadedmetadata = updResChip;
+  v.srcObject = live.stream;
+  old.srcObject = null; old.replaceWith(v);
+  v.play().catch(() => {});
 }
 
 /* ---------- 裁切（直線：四角＋拖邊平移；曲線：每條邊 5 個點，抓哪裡拉哪裡，可把彎曲的書頁拉平） ---------- */
@@ -3781,7 +3787,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '3.1.1';
+const APP_VER = '3.1.2';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
