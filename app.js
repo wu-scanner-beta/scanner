@@ -369,7 +369,7 @@ window.addEventListener('popstate', (e) => {
   else if (s === 'home') { renderHome(); show('home'); }
   else if (s === 'doc') { state.docId = e.state.doc; renderDoc(); show('doc'); }
   else if (s === 'library') { renderLibrary(); show('library'); }
-  else if (s === 'burst') { renderBurst(); show('burst'); }
+  else if (s === 'burst') { show('burst'); renderBurst(); }
   else if (s === 'live' && live.running) { show('live'); liveResume(); }
   else if (s === 'page') { state.docId = e.state.doc; state.pageIndex = e.state.i; renderPage(); show('page'); }
   else { renderHome(); show('home'); }
@@ -582,7 +582,7 @@ $('#libMerge').onclick = async () => {
 
 /* ---------- 來源選擇 ---------- */
 let cameraTarget = null; // docId 或 null（新文件）
-function openCamera() { const i = $('#fileCamera'); i.value = ''; i.click(); }
+function openCamera() { sfxPrime(); const i = $('#fileCamera'); i.value = ''; i.click(); } // 3.1.6：點擊當下啟動聲音（連拍畫面的掃描音效）
 function startSource(src, docId) {
   if (src === 'live') return startLive(docId);
   cameraTarget = docId;
@@ -597,35 +597,100 @@ async function stableBlob(file) {
 }
 
 /* ---------- 高畫質連拍 ---------- */
-const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageId: null };
+const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageId: null, fresh: false, shownKey: null, tok: 0, raf: 0, ar: 0 };
 function startBurst(docId) {
   Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null });
 }
 async function burstAdd(blob, corners, curve) {
   if (!burst.docId) burst.docId = (await createDoc()).id;
   const page = await addPage(burst.docId, blob, corners, curve);
-  burst.count++; burst.lastPageId = page.id;
+  burst.count++; burst.lastPageId = page.id; burst.fresh = true;
   return page;
 }
 function toBurst() {
-  renderBurst();
-  if (current === 'burst') return;
-  if (current === 'crop' && burst.onStack) { history.back(); return; }
+  if (current === 'burst') { renderBurst(); return; }
+  if (current === 'crop' && burst.onStack) { history.back(); return; } // popstate 會 show＋renderBurst
   if (current === 'crop') history.replaceState({ s: 'burst' }, ''); else history.pushState({ s: 'burst' }, '');
   burst.onStack = true;
-  show('burst');
+  show('burst'); // 3.1.6：先顯示再畫成品（要量得到畫面大小）
+  renderBurst();
 }
 async function renderBurst() {
   $('#burstCount').textContent = burst.count ? `已拍 ${burst.count} 張` : '尚未拍攝';
   $('#burstConfirm').classList.toggle('on', settings.confirmCrop);
-  $('#burstRetake').disabled = !burst.lastPageId;
-  const img = $('#burstImg');
-  if (burst.lastPageId) {
-    const p = await DB.get('pages', burst.lastPageId);
-    if (p) { img.src = blobUrl('burst', p.original, p.id); img.style.visibility = 'visible'; }
-  } else img.style.visibility = 'hidden';
+  $('#burstRetake').disabled = $('#burstEdit').disabled = !burst.lastPageId;
+  if (!burst.lastPageId) { burst.tok++; burst.shownKey = null; $('#burstPw').style.visibility = 'hidden'; $('#burstSpin').classList.remove('on'); return; }
+  const p = await DB.get('pages', burst.lastPageId);
+  if (!p) return;
+  const key = p.id + procKey(p);
+  if (key === burst.shownKey) { burstLayout(); return; } // 同一張、沒改過（例如框選畫面按取消回來）：不重播
+  burst.shownKey = key;
+  const anim = burst.fresh && animOn(); burst.fresh = false;
+  burstShow(p, anim);
+}
+// 3.1.6：連拍畫面顯示「成品」（框選拉正＋目前模式），不再顯示原始照片。
+// 有動畫時沿用即時掃描成品畫面（#capRes）的做法：先畫原色拉正的底圖，金色掃描光往下刷出成品，加掃描音效
+function burstLayout() {
+  const ar = burst.ar; if (!ar) return;
+  const r = $('#burstStage').getBoundingClientRect(), m = 18;
+  const w = Math.max(1, Math.min(r.width - 2 * m, (r.height - 2 * m) * ar)), h = w / ar;
+  Object.assign($('#burstPw').style, { left: (r.width - w) / 2 + 'px', top: (r.height - h) / 2 + 'px', width: w + 'px', height: h + 'px' });
+}
+async function burstShow(p, anim) {
+  const pw = $('#burstPw'), base = pw.querySelector('.cr-base'), outC = pw.querySelector('.cr-out');
+  const clip = pw.querySelector('.cr-clip'), band = pw.querySelector('.cr-band'), spin = $('#burstSpin');
+  const tok = ++burst.tok; cancelAnimationFrame(burst.raf);
+  const alive = () => tok === burst.tok;
+  const bandAt = (t) => { Object.assign(band.style, { display: 'block', left: '0', width: '100%', top: (t * 100 - 16) + '%', height: '16%', opacity: t < 0.85 ? 1 : 1 - (t - 0.85) / 0.15 }); };
+  pw.style.visibility = 'hidden'; band.style.display = 'none'; spin.classList.add('on');
+  pauseQueue(); // 先讓成品出來，背景的整頁處理稍後再跑
+  try {
+    await whenReady();
+    const { img, url } = await loadImg(p.original);
+    const f0 = anim ? smallFrame(img, 900) : null, f1 = smallFrame(img, 2000); URL.revokeObjectURL(url);
+    const job = (f, mode, params) => wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners: p.corners, curve: p.curve || null, upscale: 'off', rotation: p.rotation || 0, mode, params }, [f.data.buffer]);
+    if (anim) {
+      const r0 = await job(f0, 'original', fillAdj('original'));
+      if (!alive()) return;
+      drawTo(base, r0); burst.ar = r0.width / r0.height; burstLayout();
+      clip.style.clipPath = 'inset(0 0 100% 0)'; pw.style.visibility = 'visible'; spin.classList.remove('on');
+      const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); burst.raf = requestAnimationFrame(lp); }; burst.raf = requestAnimationFrame(lp);
+    }
+    const r = await job(f1, p.mode, pageAdjOf(p));
+    if (!alive()) return;
+    cancelAnimationFrame(burst.raf); drawTo(outC, r); spin.classList.remove('on');
+    if (!anim) {
+      base.width = base.height = 1; burst.ar = r.width / r.height; burstLayout();
+      clip.style.clipPath = 'none'; band.style.display = 'none'; pw.style.visibility = 'visible'; return;
+    }
+    sfxPlay('scan');
+    const s0 = performance.now();
+    const rev = (now) => {
+      const sp = clamp01((now - s0) / 800), e = easeIO(sp);
+      clip.style.clipPath = `inset(0 0 ${(1 - e) * 100}% 0)`; bandAt(e);
+      if (sp < 1 && alive()) burst.raf = requestAnimationFrame(rev); else band.style.display = 'none';
+    };
+    burst.raf = requestAnimationFrame(rev);
+  } catch (e) {
+    console.warn('burst result', e);
+    if (alive()) { spin.classList.remove('on'); clip.style.clipPath = 'none'; band.style.display = 'none'; pw.style.visibility = 'visible'; }
+  } finally { if (alive()) resumeQueue(); }
 }
 $('#burstNext').onclick = () => openCamera();
+// 3.1.6：繼續編輯上一張：回到框選畫面，確定後重新顯示成品（含動畫）
+$('#burstEdit').onclick = async () => {
+  if (!burst.lastPageId) return;
+  const p = await DB.get('pages', burst.lastPageId); if (!p) return;
+  openCrop({
+    blob: p.original, corners: p.corners, curve: p.curve || null,
+    onConfirm: async (c, cv, edited) => {
+      sfxPrime();
+      const q = await DB.get('pages', p.id);
+      if (q) { q.corners = c; q.curve = cv; if (edited) q.cropUser = true; await DB.put('pages', q); enqueue(q.id); burst.fresh = true; }
+      toBurst();
+    },
+  });
+};
 $('#burstConfirm').onclick = () => { settings.confirmCrop = !settings.confirmCrop; saveSettings(); renderBurst(); };
 $('#burstRetake').onclick = async () => {
   openCamera();
@@ -676,7 +741,7 @@ $('#fileCamera').addEventListener('change', async (e) => {
   if (settings.confirmCrop) {
     openCrop({
       blob, corners, curve, retake: true, burst: true,
-      onConfirm: async (c, cv, edited) => { const pg = await burstAdd(blob, c, cv); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
+      onConfirm: async (c, cv, edited) => { sfxPrime(); const pg = await burstAdd(blob, c, cv); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
       onRetake: () => openCamera(),
     });
   } else {
@@ -2005,7 +2070,6 @@ async function openCrop(opts) {
   pipInit(cropCtx);
   const ci = $('#cropImg'); ci.src = url;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
-  $('#cropNext').style.display = opts.burst ? '' : 'none';
   $('#cropCancel').textContent = opts.liveCrop ? '稍後裁切' : '取消';
   updateCurveBtn();
   if (opts.replace) { history.replaceState({ s: 'crop', doc: state.docId, i: state.pageIndex }, ''); show('crop'); } else go('crop'); // 3.1 成品畫面按「繼續編輯」：不多疊一層返回紀錄
@@ -2366,7 +2430,7 @@ function drawCrop() {
     Object.assign(L.style, { display: 'block', left: left + 'px', top: top + 'px', right: '' });
   }
 })();
-window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } });
+window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'burst') burstLayout(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } });
 $('#cropFull').onclick = () => {
   cropCtx.corners = FULL.map((p) => p.slice());
   cropCtx.curve = cropCtx.curveMode ? straightCurve(cropCtx.corners) : null;
@@ -2415,7 +2479,6 @@ $('#cropOk').onclick = async () => {
   await c.onConfirm(q, cv, edited);
 };
 $('#cropCancel').onclick = () => history.back();
-$('#cropNext').onclick = () => { if (!cropCtx) return; openCamera(); $('#cropOk').onclick(); };
 $('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
 $('#cropPrev').onclick = () => ($('#pipFull').classList.contains('show') ? pipFullClose() : pipFullOpen()); // 3.1：再按一次回到框選
 
@@ -3838,7 +3901,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '3.1.5';
+const APP_VER = '3.1.6';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3865,6 +3928,7 @@ const CHANGELOG = [
     { t: '框選畫面支援雙指縮放；相簿匯入與高畫質拍照也能自動 AI 框選', since: '3.0.1' },
     { t: '即時掃描加框選動畫', since: '3.1' },
     { t: '最佳化立即裁切：編輯時暫停相機，減少耗電與發熱', since: '3.1.5' },
+    { t: '最佳化高畫質拍照流程體驗', since: '3.1.6' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
