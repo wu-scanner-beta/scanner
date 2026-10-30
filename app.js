@@ -383,7 +383,9 @@ function toast(msg) {
 }
 function busy(msg) { $('#busyMsg').textContent = msg || '處理中…'; $('#busy').classList.add('show'); }
 function unbusy() { $('#busy').classList.remove('show'); }
+let sheetOpenAt = 0;
 function openSheet(html, bind) {
+  sheetOpenAt = Date.now();
   $('#sheet').innerHTML = '<div class="grab"></div>' + html;
   $('#sheetWrap').classList.add('show');
   if (bind) bind($('#sheet'));
@@ -404,7 +406,8 @@ function askSheet(title, msg, okText, cancelText) {
     sheetOnClose = () => fin(false);
   });
 }
-$('#sheetWrap').addEventListener('click', (e) => { if (e.target.id === 'sheetWrap') closeSheet(); });
+// 3.1.3：剛打開 0.4 秒內點到背景不關（新增頁面那一格在手指放開時就打開選單，接著的點擊會落在背景上）
+$('#sheetWrap').addEventListener('click', (e) => { if (e.target.id === 'sheetWrap' && Date.now() - sheetOpenAt > 400) closeSheet(); });
 
 const ICON = {
   ai: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>',
@@ -1774,8 +1777,8 @@ function playCapFx(frame, quad, stay) {
     if (sp >= 1) {
       if (stay) {
         // 立即裁切：等 AI／偵測做完，掃描光循環
-        // 等 AI 時掃描光循環：每秒重畫約 40 次（3.1.1 是 15 次，作者覺得卡；弱 Android 已預設關動畫），讓一點運算給 AI
-        if (!released) { if (!loop0) loop0 = now; placeBand(easeIO(((now - loop0) / 800) % 1)); raf = setTimeout(() => frameFn(performance.now()), 25); return; }
+        // 等 AI 時掃描光循環：跟著螢幕刷新（3.1.1 降到 15 次、3.1.2 用計時器 40 次，和螢幕刷新對不上、間隔不均反而卡；3.1.3 改回，弱 Android 已預設關動畫）
+        if (!released) { if (!loop0) loop0 = now; placeBand(easeIO(((now - loop0) / 800) % 1)); raf = requestAnimationFrame(frameFn); return; }
         band.style.display = 'none'; resolveReady(); return; // 停在攤平的畫面，等進框選畫面後再 stop()
       }
       band.style.display = 'none';
@@ -1828,7 +1831,7 @@ function showCapResult(pageId) {
       const r0 = await job(f0, 'original', fillAdj('original'));
       if (done) return;
       drawTo(base, r0); capResLayout(r0.width / r0.height);
-      if (anim) { spin.classList.remove('on'); const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); raf = setTimeout(() => lp(performance.now()), 25); }; raf = requestAnimationFrame(lp); }
+      if (anim) { spin.classList.remove('on'); const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); raf = requestAnimationFrame(lp); }; raf = requestAnimationFrame(lp); }
       const r = await job(f1, p.mode, pageAdjOf(p));
       if (done) return;
       cancelAnimationFrame(raf); clearTimeout(raf); drawTo(outC, r); spin.classList.remove('on');
@@ -2539,7 +2542,18 @@ async function renderDoc() {
   const add = document.createElement('button');
   add.className = 'pg add';
   add.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新增頁面';
-  add.onclick = addSheet;
+  // 3.1.3：偶爾點了沒反應（剛進 App、剛從相簿匯入回來）。排序套件碰到這一格會取消觸控事件，iPhone 有時連點擊一起吞掉；
+  // 套件改成不取消（preventOnFilter:false），這一格也直接聽手指放開，兩邊在 400 ms 內只開一次
+  let addAt = 0;
+  const openAdd = () => { const now = Date.now(); if (now - addAt < 400) return; addAt = now; addSheet(); };
+  add.onclick = openAdd;
+  let addDown = null; // 只算「點一下」：按下到放開移動不到 10 點（捲動頁面時不會誤開）
+  add.addEventListener('pointerdown', (e) => { addDown = [e.clientX, e.clientY, Date.now()]; });
+  add.addEventListener('pointerup', (e) => {
+    const d = addDown; addDown = null;
+    if (e.pointerType === 'mouse' || !d || Math.hypot(e.clientX - d[0], e.clientY - d[1]) > 10 || Date.now() - d[2] > 600) return;
+    openAdd();
+  });
   g.appendChild(add);
   setupSort(g);
   if (sorter) sorter.option('disabled', docSel.on);
@@ -2572,7 +2586,7 @@ function setupSort(g) {
   if (typeof Sortable === 'undefined') return;
   sorter = Sortable.create(g, {
     draggable: '.pg:not(.add)',
-    filter: '.add',
+    filter: '.add', preventOnFilter: false,
     animation: 160,
     delay: 220, delayOnTouchOnly: true, touchStartThreshold: 6,
     ghostClass: 'pg-ghost', chosenClass: 'pg-chosen', dragClass: 'pg-drag',
@@ -3787,7 +3801,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '3.1.2';
+const APP_VER = '3.1.3';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
