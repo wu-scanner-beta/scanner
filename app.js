@@ -725,7 +725,7 @@ async function startLive(docId) {
   Object.assign(live, {
     running: true, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
-    aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false,
+    aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false, camOff: false,
   });
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
@@ -860,8 +860,22 @@ async function restartCamera() {
     toast('相機無法重新開啟，已結束掃描'); finishLive();
   }
 }
+/* 3.1.5：立即裁切等 AI、框選、看成品時暫停相機（作者：舊手機 AI 框選要等很久，相機一直開著）。
+   不是關掉：相機軌道停止送畫面（track.enabled＝false）、播放器暫停、偵測與綠框重畫停止，權限與連線保留，
+   回來不會重新詢問權限、幾乎不用等。回到拍攝畫面（liveResume）時恢復，並換一個新的影片元素（3.1.2，避免畫面縮小） */
+function camPause() {
+  if (!live.running || live.camOff) return;
+  live.camOff = true;
+  try { if (live.track) live.track.enabled = false; } catch (_) {}
+  try { $('#video').pause(); } catch (_) {}
+}
+function camResume() {
+  if (!live.camOff) return;
+  live.camOff = false;
+  try { if (live.track) live.track.enabled = true; } catch (_) {}
+}
 function stopLive() {
-  live.running = false;
+  live.running = false; live.camOff = false;
   clearTimeout(camTipT); $('#camTip').classList.remove('show');
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
   live.stream = null;
@@ -1130,6 +1144,7 @@ function videoRect() {
 }
 function drawOverlay() {
   if (!live.running) return;
+  if (live.camOff) { requestAnimationFrame(drawOverlay); return; } // 3.1.5 相機暫停時不重畫
   const cv = $('#overlay');
   const dpr = window.devicePixelRatio || 1;
   const R = videoRect();
@@ -1302,6 +1317,7 @@ async function capture(sig, full, quadAt, userPress) {
       // 3.1：立即裁切＝每拍一張就進框選（1.19～3.0 只有手動拍攝、或框沒穩就自己按快門的才進）
       // 1.29：自動 AI 框選開著時，先用 AI 框好再進裁切畫面（兩種手機都一樣）；3.1 有動畫時掃描光循環到 AI 框好
       live.paused = true;
+      camPause(); // 3.1.5：拍下的照片已經存好，等 AI、框選、看成品時相機先暫停
       let curve = null;
       if (settings.autoAI && (await aiCached())) {
         if (!fx) busy('AI 框選中…');
@@ -1436,6 +1452,7 @@ $('#camTipX').onclick = () => { clearTimeout(camTipT); $('#camTip').classList.re
 /* 1.19 立即裁切：拍完直接進裁切畫面；相機不關，只暫停找框，回來就能接著拍 */
 function openLiveCrop(page, blob, corners, curve, replace) {
   live.paused = true;
+  camPause(); // 3.1.5
   openCrop({
     blob, corners, curve: curve || null, retake: true, liveCrop: true, replace,
     onConfirm: async (c, cv, edited) => {
@@ -1474,6 +1491,7 @@ async function removeLivePage(pageId) {
 function liveResume() {
   live.paused = false;
   if (!live.track || live.track.readyState === 'ended') { finishLive(); return; } // 中途被切到背景，相機已經關了
+  camResume(); // 3.1.5：相機恢復送畫面
   // 1.20：iPhone 從裁切畫面回來時，相機畫面會用錯誤的大小重畫（縮成約四分之三、四周變黑）。
   // 把串流重新接上一次、並讓影片元素重新排版，強制以正確大小重畫
   freshVideo(); // 3.1.2：換新的影片元素（舊的做法是重接串流）
@@ -3820,7 +3838,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '3.1.4';
+const APP_VER = '3.1.5';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -3846,6 +3864,7 @@ const CHANGELOG = [
     { t: '加入主畫面說明，並新增影片教學', since: '3.0' },
     { t: '框選畫面支援雙指縮放；相簿匯入與高畫質拍照也能自動 AI 框選', since: '3.0.1' },
     { t: '即時掃描加框選動畫', since: '3.1' },
+    { t: '最佳化立即裁切：編輯時暫停相機，減少耗電與發熱', since: '3.1.5' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
