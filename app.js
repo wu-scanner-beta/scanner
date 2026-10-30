@@ -754,6 +754,7 @@ async function startLive(docId) {
     const v = $('#video');
     v.srcObject = stream;
     await v.play().catch(() => {});
+    if (IS_IOS) fixVideoSoon(400); // 3.1.1：從文件頁重新開啟時相機畫面可能被畫小
     try {
       const caps = live.track.getCapabilities ? live.track.getCapabilities() : {};
       $('#torchBtn').style.display = caps.torch ? '' : 'none';
@@ -1463,6 +1464,7 @@ function liveResume() {
   v.style.display = 'none'; void v.offsetHeight; v.style.display = '';
   v.srcObject = null; v.srcObject = st;
   v.play().catch(() => {});
+  fixVideoSoon(); // 3.1.1：再補一次（剛回來時立刻重接，偶爾被還在收掉的畫面蓋過去）
   reapplyTorch();
   if (settings.autoShutter) setHint(live.armed ? '將文件放進畫面中' : '已拍好，請換下一頁', !live.armed);
   else hideHint();
@@ -1644,7 +1646,9 @@ document.addEventListener('visibilitychange', () => {
    設定「拍攝動畫」關掉（弱 Android 預設關）或系統開「減少動態效果」時，只有閃光與縮圖跳動；成品畫面改用轉圈。
    音效用 Web Audio 現場合成（不另外下載）：快門「咔、嚓」、掃描「刷—叮」；設定「拍攝音效」可關，
    iPhone 設成 ambient 跟著靜音開關，兩邊都跟著手機音量（網頁無法知道 Android 是否在靜音／震動模式） */
-const animPref = () => (settings.capAnim !== undefined ? !!settings.capAnim : !aiWeak()); // 設定開關顯示的值
+// 3.1.1：Android 記憶體回報小於 8 GB（Chrome 只回報 0.25～8，Y31 回報 4）預設關；作者 Y31 開動畫後 AI 框選變慢（主畫面重畫和 AI 搶運算）
+const animWeak = () => !IS_IOS && (settings.camAutoLow || !(navigator.deviceMemory >= 8));
+const animPref = () => (settings.capAnim !== undefined ? !!settings.capAnim : !animWeak()); // 設定開關顯示的值
 const animOn = () => !(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) && animPref();
 const sfx = { ctx: null, buf: {} };
 // 在使用者點擊的當下呼叫（iPhone 要在點擊裡才能啟動聲音）
@@ -1754,7 +1758,8 @@ function playCapFx(frame, quad, stay) {
   };
   const h = { landed, ready, release() { released = true; }, stop };
   function stop() {
-    cancelAnimationFrame(raf); root.classList.remove('on'); band.style.display = 'none';
+    cancelAnimationFrame(raf); clearTimeout(raf); root.classList.remove('on'); band.style.display = 'none';
+    paper.width = paper.height = scan.width = scan.height = 1; // 3.1.1：釋放大張畫布（iPhone 圖層記憶體吃緊時相機畫面會被畫小）
     if (capFx.cur === h) capFx.cur = null;
     if (!landedDone) { landedDone = true; resolveLand(); }
     resolveReady();
@@ -1772,7 +1777,8 @@ function playCapFx(frame, quad, stay) {
     if (sp >= 1) {
       if (stay) {
         // 立即裁切：等 AI／偵測做完，掃描光循環
-        if (!released) { if (!loop0) loop0 = now; placeBand(easeIO(((now - loop0) / 800) % 1)); raf = requestAnimationFrame(frameFn); return; }
+        // 等 AI 時掃描光循環：每秒只重畫約 15 次，把運算讓給 AI（3.1.1）
+        if (!released) { if (!loop0) loop0 = now; placeBand(easeIO(((now - loop0) / 800) % 1)); raf = setTimeout(() => requestAnimationFrame(frameFn), 55); return; }
         band.style.display = 'none'; resolveReady(); return; // 停在攤平的畫面，等進框選畫面後再 stop()
       }
       band.style.display = 'none';
@@ -1811,7 +1817,7 @@ function showCapResult(pageId) {
   el.classList.add('on');
   const bandAt = (p) => { Object.assign(band.style, { display: 'block', left: '0', width: '100%', top: (p * 100 - 16) + '%', height: '16%', opacity: p < 0.85 ? 1 : 1 - (p - 0.85) / 0.15 }); };
   const result = new Promise((res) => {
-    capRes.resolve = (v) => { if (done) return; done = true; cancelAnimationFrame(raf); capRes.resolve = null; res(v); };
+    capRes.resolve = (v) => { if (done) return; done = true; cancelAnimationFrame(raf); clearTimeout(raf); capRes.resolve = null; res(v); };
   });
   $('#crEdit').onclick = () => { el.classList.remove('on'); capRes.resolve && capRes.resolve('edit'); };
   $('#crOk').onclick = () => capRes.resolve && capRes.resolve('ok');
@@ -1825,10 +1831,10 @@ function showCapResult(pageId) {
       const r0 = await job(f0, 'original', fillAdj('original'));
       if (done) return;
       drawTo(base, r0); capResLayout(r0.width / r0.height);
-      if (anim) { spin.classList.remove('on'); const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); raf = requestAnimationFrame(lp); }; raf = requestAnimationFrame(lp); }
+      if (anim) { spin.classList.remove('on'); const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); raf = setTimeout(() => requestAnimationFrame(lp), 55); }; raf = requestAnimationFrame(lp); }
       const r = await job(f1, p.mode, pageAdjOf(p));
       if (done) return;
-      cancelAnimationFrame(raf); drawTo(outC, r); spin.classList.remove('on');
+      cancelAnimationFrame(raf); clearTimeout(raf); drawTo(outC, r); spin.classList.remove('on');
       if (!anim) { clip.style.clipPath = 'none'; band.style.display = 'none'; return; }
       sfxPlay('scan');
       const s0 = performance.now();
@@ -1855,7 +1861,23 @@ async function capResFly() {
     await new Promise((r) => setTimeout(r, 320));
   }
   el.classList.remove('on'); pw.style.transition = ''; pw.style.transform = '';
+  for (const c of el.querySelectorAll('canvas')) c.width = c.height = 1; // 3.1.1：釋放大張畫布
   bumpThumb();
+  fixVideoSoon(); // 3.1.1：動畫圖層收掉後再重接一次相機
+}
+/* 3.1.1：iPhone 從其他畫面回到拍攝時，相機畫面偶爾用錯的大小重畫（縮小、四周變黑，1.20 第一次遇到）。
+   3.1 加了動畫圖層後更常發生，也發生在從文件頁重新開即時掃描時。把串流重新接上一次，強迫用正確大小重畫；
+   等畫面穩定（兩個畫格＋短暫延遲）再做，太早做會被還在收掉的圖層蓋過去 */
+let fixVT = 0;
+function fixVideoSoon(ms) {
+  clearTimeout(fixVT);
+  fixVT = setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (!live.running || current !== 'live' || !live.stream || live.track && live.track.readyState === 'ended') return;
+    const v = $('#video');
+    v.style.display = 'none'; void v.offsetHeight; v.style.display = '';
+    v.srcObject = null; v.srcObject = live.stream;
+    v.play().catch(() => {});
+  })), ms || 250);
 }
 
 /* ---------- 裁切（直線：四角＋拖邊平移；曲線：每條邊 5 個點，抓哪裡拉哪裡，可把彎曲的書頁拉平） ---------- */
@@ -3759,7 +3781,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '3.1';
+const APP_VER = '3.1.1';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
