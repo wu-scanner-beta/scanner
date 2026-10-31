@@ -54,7 +54,7 @@ const cloneAdj = (a) => JSON.parse(JSON.stringify(a || {}));
 const userDefOf = (mode) => fillAdj(mode, settings.adj[mode]);
 const userDefAll = () => Object.fromEntries(MODES.map((m) => [m.id, userDefOf(m.id)]));
 // 處理結果的「身分」：模式、旋轉、四角、這一頁實際用的調整數值，任何一項變了就要重算
-function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, p.curve || null, pageAdjOf(p), settings.upscale]); }
+function procKey(p) { return JSON.stringify([p.mode, p.rotation || 0, p.corners, p.curve || null, pageAdjOf(p), settings.upscale, p.ai ? p.aiSide || 1 : 0]); }
 // 1.29：沒有照片資料的壞頁面（弱手機轉檔失敗留下的）不處理，避免每個畫面一直跳錯誤
 const isBroken = (p) => !(p && p.original instanceof Blob && p.original.size > 0);
 function isStale(p) { if (isBroken(p)) return false; return !p.processed || p.pkey !== procKey(p); }
@@ -237,10 +237,13 @@ async function processPageNow(pageId) {
   if (!page || isBroken(page) || !isStale(page)) return;
   const key = procKey(page);
   await whenReady();
-  const d = await decodeFull(page.original);
+  // 4.1：AI 精修的頁先確定有精修圖（拉正＋精修，和模式、調整數值無關，只看框），再從精修圖套用模式
+  const sr = page.ai ? await srEnsurePage(page) : null;
+  if (page.ai && !sr) return; // 精修被取消（使用者關掉）：等下一次處理
+  const d = await decodeFull(sr || page.original);
   const r = await wcall('process', {
     buffer: d.data.buffer, width: d.width, height: d.height,
-    corners: page.corners, curve: page.curve || null, upscale: settings.upscale,
+    corners: sr ? FULL : page.corners, curve: sr ? null : page.curve || null, upscale: sr ? 'off' : settings.upscale,
     rotation: page.rotation || 0, mode: page.mode, params: pageAdjOf(page),
   }, [d.data.buffer]);
   const c = canvasOf(r.width, r.height);
@@ -2982,6 +2985,7 @@ async function renderPage(keepZoom) {
   $('#modeChips').querySelectorAll('.chip[data-m]').forEach((b) => b.onclick = () => updatePage({ mode: b.dataset.m }));
   $('#adjBtn').onclick = openAdjust;
   updateHistBtns();
+  srBtnState(p);
 }
 function fitView() {
   const img = $('#viewImg');
@@ -3087,6 +3091,7 @@ async function updatePage(patch) {
   const p = await DB.get('pages', viewPage.id);
   pushHist(p);
   Object.assign(p, patch);
+  for (const k of Object.keys(patch)) if (patch[k] === undefined) delete p[k]; // 4.1：undefined＝刪除欄位（關閉精修）
   await DB.put('pages', p);
   viewPage = p;
   enqueue(p.id);
@@ -3161,9 +3166,10 @@ async function adjPrepare(p) {
     const st = $('#viewStage').getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
     const maxSide = Math.min(1800, Math.ceil(Math.max(st.width, st.height) * dpr));
-    const d = await decodeFull(p.original);
+    const srOk = srReady(p); // 4.1：精修過的頁，預覽也從精修圖開始
+    const d = await decodeFull(srOk ? p.sr : p.original);
     if (!adj.open || key !== adj.key) return;
-    const info = await wcall('prepare', { key, buffer: d.data.buffer, width: d.width, height: d.height, corners: p.corners, curve: p.curve || null, upscale: settings.upscale, maxSide }, [d.data.buffer]);
+    const info = await wcall('prepare', { key, buffer: d.data.buffer, width: d.width, height: d.height, corners: srOk ? FULL : p.corners, curve: srOk ? null : p.curve || null, upscale: srOk ? 'off' : settings.upscale, maxSide }, [d.data.buffer]);
     if (!adj.open || key !== adj.key) return;
     const sw = rotSwap(adj.rotation);
     adj.pw = sw ? info.height : info.width; adj.ph = sw ? info.width : info.height;
@@ -3752,6 +3758,7 @@ function openHelp() {
       <li>黑白最適合樂譜，灰階、彩色適合有照片或顏色的講義。</li>
       <li>「調整」可以改曝光、濃淡、去雜點等。按住畫面，可以和原本的數值比較。</li>
       <li>文件頁的「統一調整」可以一次調整全部頁面；在單頁裡調整只會影響那一頁。</li>
+      <li>單頁右上角的「✨ 精修」用 AI 讓線條與文字更清晰，四種模式都適用；處理需要一點時間（較舊的手機可能要幾分鐘），再按一次可以關閉。</li>
       <li>常用的數值可以在「設定 → 預設調整數值」改好，之後的新文件都會從這組數值開始。</li></ul>
     <h4>管理文件</h4><ul>
       <li>長按頁面可以拖曳排序，也可以選取多頁刪除。</li>
@@ -3778,7 +3785,7 @@ $('#cvDonate').onclick = () => openDonate();
 const hist = new Map();
 const HIST_MAX = 20;
 function snapOf(p) {
-  return JSON.parse(JSON.stringify({ corners: p.corners, curve: p.curve || null, rotation: p.rotation || 0, mode: p.mode, adj: p.adj || null, needCrop: !!p.needCrop }));
+  return JSON.parse(JSON.stringify({ corners: p.corners, curve: p.curve || null, rotation: p.rotation || 0, mode: p.mode, adj: p.adj || null, needCrop: !!p.needCrop, ai: p.ai ? p.aiSide || 1 : 0 }));
 }
 function pushHist(p, tag) {
   let h = hist.get(p.id);
@@ -3792,6 +3799,7 @@ async function applySnap(pageId, s) {
   p.corners = s.corners; p.curve = s.curve; p.rotation = s.rotation; p.mode = s.mode;
   if (s.adj) p.adj = s.adj; else delete p.adj;
   if (s.needCrop) p.needCrop = true; else delete p.needCrop;
+  if (s.ai) { p.ai = true; p.aiSide = s.ai; } else { delete p.ai; delete p.aiSide; delete p.sr; delete p.srKey; } // 4.1
   await DB.put('pages', p);
   enqueue(p.id);
   return p;
@@ -3937,9 +3945,9 @@ async function aiDropOld() {
   try { const c = await caches.open(AI_CACHE); for (const [f] of AI_OLD) await c.delete(new URL(f, location.href).href); } catch (_) {}
 }
 const AI_DL_MB = mbOf([AI_MODEL, ...AI_NEW]), AI_UP_MB = mbOf(AI_NEW);
-async function aiEnsure(inApp, noAsk) {
+async function aiEnsure(inApp, noAsk, what) {
   if (await aiCached()) return true;
-  const ask = `AI 框選需要先下載約 ${AI_DL_MB} MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？`;
+  const ask = `${what || 'AI 框選'}需要先下載約 ${what ? AI_DL_MB + 3 : AI_DL_MB} MB 的資料（只需一次，之後離線也能用），建議在 Wi-Fi 下使用。要下載嗎？`;
   if (!noAsk && (inApp ? !(await askSheet('下載 AI 資料', ask, '下載')) : !confirm(ask))) return false; // 2.1：noAsk＝已經在預設開啟的詢問裡問過
   const st = await aiState();
   const need = [...(st.model ? [] : [AI_MODEL]), ...AI_NEW];
@@ -4045,10 +4053,126 @@ async function aiFrameDoc() {
   }, { passive: false });
 })();
 
+/* ---------- 4.1 AI 精修（Real-ESRGAN 線稿模型） ----------
+   作者實驗：AI 放在「轉黑白之前」才有用；先把拉正的頁面縮到長邊 aiSide（預設 2000），放大 4 倍，再縮回頁面原尺寸，
+   之後照常套用模式（黑白／灰階／彩色／原圖都可以）。精修圖（page.sr，JPEG）只和框有關（srKey），換模式、調數值不用重跑。
+   速度看實測（不看有沒有 GPU，Y31 有 GPU 但很慢）：第一次先測一塊的時間（srBench），推算整頁：
+   ≤ 20 秒用 2000；否則選 1600／1200 中 ≤ 60 秒的最大值；都超過就用 1200 並先跳字卡確認。實際跑完會更新每塊時間。 */
+const SR_FILE = ['lib/ai/sr-anime.onnx', 'application/octet-stream', 2492830];
+const SR_VER = 1, SR_TILE = 192, SR_PAD = 12, SR_IN = SR_TILE + SR_PAD * 2;
+const srProg = new Map(), srCancel = new Set();
+const srKeyOf = (p) => JSON.stringify([p.corners, p.curve || null, p.aiSide || 2000, SR_VER]);
+const srReady = (p) => !!(p && p.ai && p.sr instanceof Blob && p.srKey === srKeyOf(p));
+async function srEnsureModel() {
+  if (!(await aiEnsure(true, false, 'AI 精修'))) return false;
+  if (await aiHas([SR_FILE])) return true;
+  return aiDownload([SR_FILE], '下載 AI 精修資料中…');
+}
+async function srBenchNow() {
+  const b = settings.srBench;
+  if (b && b.v === SR_VER && b.ms > 0) return b;
+  busy('正在測試這支手機的速度…');
+  try {
+    const r = await aiCall({ type: 'srBench', n: SR_IN });
+    const ep = r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm';
+    settings.srBench = { v: SR_VER, ep, ms: Math.round(ep === 'webgpu' ? r.gpu : r.cpu) };
+    saveSettings(); console.info('SR bench', r, settings.srBench);
+    return settings.srBench;
+  } finally { unbusy(); }
+}
+// 頁面拉正後的大小（估計用）：處理過就用成品尺寸（轉向不影響塊數），否則用原圖的 3/4 長邊估
+function srPageSize(p) { return p.outW && p.outH ? [p.outW, p.outH] : [2400, 3200]; }
+function srTiles(p, side) { const [w, h] = srPageSize(p), s = Math.min(1, side / Math.max(w, h)); return Math.ceil((w * s) / SR_TILE) * Math.ceil((h * s) / SR_TILE); }
+function srPlan(p, ms) {
+  const est = (side) => srTiles(p, side) * ms;
+  if (est(2000) <= 20000) return { side: 2000, est: est(2000) };
+  for (const side of [1600, 1200]) if (est(side) <= 60000) return { side, est: est(side) };
+  return { side: 1200, est: est(1200), ask: true };
+}
+// 拉正 → 縮到 aiSide → 分塊精修 → 縮回頁面原尺寸；回傳 JPEG Blob。關掉精修（srCancel）時回傳 null
+async function srRun(page) {
+  const d = await decodeFull(page.original);
+  const w = await wcall('process', { buffer: d.data.buffer, width: d.width, height: d.height, corners: page.corners, curve: page.curve || null, upscale: 'off', rotation: 0, mode: 'original', params: fillAdj('original') }, [d.data.buffer]);
+  const W = w.width, H = w.height, side = page.aiSide || 2000, s = Math.min(1, side / Math.max(W, H));
+  const sw = Math.max(1, Math.round(W * s)), sh = Math.max(1, Math.round(H * s));
+  let src = canvasOf(W, H); src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(w.buffer), W, H), 0, 0);
+  const small = canvasOf(sw, sh), sx = small.getContext('2d', { willReadFrequently: true }); sx.imageSmoothingQuality = 'high'; sx.drawImage(src, 0, 0, sw, sh);
+  src.width = src.height = 0; src = null;
+  const scale = Math.min(4, W / sw), OW = Math.round(sw * scale), OH = Math.round(sh * scale);
+  const out = canvasOf(OW, OH), ox = out.getContext('2d'); ox.imageSmoothingQuality = 'high';
+  const tmp = canvasOf(SR_IN * 4, SR_IN * 4), tx = tmp.getContext('2d');
+  const nx = Math.ceil(sw / SR_TILE), ny = Math.ceil(sh / SR_TILE), total = nx * ny;
+  await aiCall({ type: 'srEP', ep: (settings.srBench && settings.srBench.ep) || 'wasm' });
+  const t0 = performance.now(); let done = 0;
+  try {
+    for (let ty = 0; ty < ny; ty++) for (let txi = 0; txi < nx; txi++) {
+      if (srCancel.has(page.id)) return null;
+      const x0 = txi * SR_TILE, y0 = ty * SR_TILE;
+      const rx = Math.max(0, x0 - SR_PAD), ry = Math.max(0, y0 - SR_PAD), ex = Math.min(sw, x0 + SR_TILE + SR_PAD), ey = Math.min(sh, y0 + SR_TILE + SR_PAD);
+      const g = sx.getImageData(rx, ry, ex - rx, ey - ry).data, gw = ex - rx, gh = ey - ry;
+      const buf = new Uint8ClampedArray(SR_IN * SR_IN * 4);
+      for (let y = 0; y < SR_IN; y++) {
+        const yy = Math.min(gh - 1, Math.max(0, y0 - SR_PAD + y - ry));
+        for (let x = 0; x < SR_IN; x++) { const xx = Math.min(gw - 1, Math.max(0, x0 - SR_PAD + x - rx)), k = (yy * gw + xx) * 4, i = (y * SR_IN + x) * 4; buf[i] = g[k]; buf[i + 1] = g[k + 1]; buf[i + 2] = g[k + 2]; buf[i + 3] = 255; }
+      }
+      const r = await aiCall({ type: 'srTile', buffer: buf.buffer, n: SR_IN }, [buf.buffer]);
+      tx.putImageData(new ImageData(new Uint8ClampedArray(r), SR_IN * 4, SR_IN * 4), 0, 0);
+      const tw = Math.min(SR_TILE, sw - x0), th = Math.min(SR_TILE, sh - y0);
+      ox.drawImage(tmp, SR_PAD * 4, SR_PAD * 4, tw * 4, th * 4, x0 * scale, y0 * scale, tw * scale, th * scale);
+      done++; srProg.set(page.id, done / total); srBtnProgress(page.id);
+    }
+    // 實際每塊時間（指數平均），下次預估更準
+    const per = (performance.now() - t0) / total, b = settings.srBench;
+    if (b && b.v === SR_VER) { b.ms = Math.round(b.ms * 0.5 + per * 0.5); saveSettings(); }
+    return await toBlob(out, 'image/jpeg', 0.95);
+  } finally {
+    small.width = small.height = 0; out.width = out.height = 0; tmp.width = tmp.height = 0;
+    srProg.delete(page.id);
+  }
+}
+// 處理佇列裡呼叫：精修圖過期就重跑並存起來；回傳可用的精修圖（或 null）
+async function srEnsurePage(page) {
+  if (srReady(page)) return page.sr;
+  srCancel.delete(page.id);
+  let blob = null;
+  try { await srEnsureModel(); blob = await srRun(page); }
+  catch (e) { console.warn('AI 精修', e); toast('AI 精修失敗：' + (e && e.message ? e.message : e)); }
+  if (!blob) return null;
+  const latest = await DB.get('pages', page.id);
+  if (!latest || !latest.ai || srKeyOf(latest) !== srKeyOf(page)) return null;
+  latest.sr = blob; latest.srKey = srKeyOf(page);
+  await DB.put('pages', latest);
+  page.sr = blob; page.srKey = latest.srKey;
+  return blob;
+}
+function srBtnState(p) {
+  const b = $('#pageAi'); if (!b || !p) return;
+  const prog = srProg.get(p.id);
+  b.classList.toggle('on', !!p.ai && srReady(p) && prog === undefined);
+  b.classList.toggle('busy', !!p.ai && !srReady(p));
+  b.textContent = p.ai && !srReady(p) ? `✨ ${prog !== undefined ? Math.round(prog * 100) + '%' : '精修中'}` : '✨ 精修';
+}
+function srBtnProgress(id) { if (current === 'page' && viewPage && viewPage.id === id) srBtnState(viewPage); }
+$('#pageAi').onclick = async () => {
+  const p = viewPage; if (!p) return;
+  if (p.ai) { srCancel.add(p.id); await updatePage({ ai: false, aiSide: undefined, sr: undefined, srKey: undefined }); toast('已關閉 AI 精修'); return; }
+  try {
+    if (!(await srEnsureModel())) return;
+    const b = await srBenchNow();
+    const plan = srPlan(p, b.ms);
+    if (plan.ask) {
+      const min = Math.max(1, Math.round(plan.est / 6000) / 10);
+      if (!(await askSheet('✨ AI 精修', `此功能效能需求較高，每頁約需 ${min} 分鐘，處理期間手機可能會發熱，確定要精修嗎？`, '精修'))) return;
+    }
+    if (viewPage !== p && (!viewPage || viewPage.id !== p.id)) return;
+    await updatePage({ ai: true, aiSide: plan.side });
+  } catch (e) { console.warn(e); toast('AI 精修無法使用：' + (e && e.message ? e.message : e)); }
+};
+
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.0.2';
+const APP_VER = '4.1';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字

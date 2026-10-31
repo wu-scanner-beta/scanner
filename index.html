@@ -70,6 +70,11 @@ svg{display:block}
 .bar h1{font-size:19px;margin:0 0 0 4px;font-weight:700;letter-spacing:.06em;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bar .title-btn{flex:1;text-align:left;font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:6px 4px}
 .ibtn{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;flex:none}
+/* 4.1：單頁右上角「✨ 精修」：外框＝未精修，處理中顯示進度，亮金色＝已精修 */
+.aibtn{flex:none;height:32px;padding:0 11px;border-radius:16px;border:1.5px solid var(--caramel);color:var(--cocoa);background:transparent;font-size:13.5px;font-weight:700;white-space:nowrap;margin-right:2px}
+.aibtn.busy{background:var(--cream);color:var(--cocoa-l)}
+.aibtn.on{background:linear-gradient(135deg,#F2C48D,#E5A85E);border-color:#D9963F;color:#4A2F22}
+.aibtn:active{transform:scale(.95)}
 .ibtn:active{background:rgba(107,70,50,.1)}
 .ibtn svg{width:24px;height:24px}
 .tbtn{padding:8px 12px;border-radius:10px;font-weight:600;font-size:15px}
@@ -748,6 +753,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   <header class="bar">
     <button class="ibtn" id="pageBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
     <h1 id="pageTitle" style="text-align:center;font-size:16px"></h1>
+    <button class="aibtn" id="pageAi" aria-label="AI 精修">✨ 精修</button>
     <button class="ibtn" id="pageDel" aria-label="刪除此頁"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg></button>
   </header>
   <div id="viewStage">
