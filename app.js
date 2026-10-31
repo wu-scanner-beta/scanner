@@ -597,7 +597,7 @@ async function stableBlob(file) {
 }
 
 /* ---------- 高畫質連拍 ---------- */
-const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageId: null, fresh: false, shownKey: null, tok: 0, raf: 0, ar: 0 };
+const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageId: null, fresh: false, shownKey: null, tok: 0, sw: null, ar: 0 };
 function startBurst(docId) {
   Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null });
 }
@@ -619,7 +619,7 @@ async function renderBurst() {
   $('#burstCount').textContent = burst.count ? `已拍 ${burst.count} 張` : '尚未拍攝';
   $('#burstConfirm').classList.toggle('on', settings.confirmCrop);
   $('#burstRetake').disabled = $('#burstEdit').disabled = !burst.lastPageId;
-  if (!burst.lastPageId) { burst.tok++; burst.shownKey = null; $('#burstPw').style.visibility = 'hidden'; $('#burstSpin').classList.remove('on'); return; }
+  if (!burst.lastPageId) { burst.tok++; if (burst.sw) { burst.sw.stop(); burst.sw = null; } burst.shownKey = null; $('#burstPw').style.visibility = 'hidden'; $('#burstSpin').classList.remove('on'); return; }
   const p = await DB.get('pages', burst.lastPageId);
   if (!p) return;
   const key = p.id + procKey(p);
@@ -639,10 +639,9 @@ function burstLayout() {
 async function burstShow(p, anim) {
   const pw = $('#burstPw'), base = pw.querySelector('.cr-base'), outC = pw.querySelector('.cr-out');
   const clip = pw.querySelector('.cr-clip'), band = pw.querySelector('.cr-band'), spin = $('#burstSpin');
-  const tok = ++burst.tok; cancelAnimationFrame(burst.raf);
+  const tok = ++burst.tok; if (burst.sw) { burst.sw.stop(); burst.sw = null; }
   const alive = () => tok === burst.tok;
-  const bandAt = (t) => { Object.assign(band.style, { display: 'block', left: '0', width: '100%', top: (t * 100 - 16) + '%', height: '16%', opacity: t < 0.85 ? 1 : 1 - (t - 0.85) / 0.15 }); };
-  pw.style.visibility = 'hidden'; band.style.display = 'none'; spin.classList.add('on');
+  pw.style.visibility = 'hidden'; bandInit(band); clip.style.opacity = ''; clip.style.transition = ''; spin.classList.add('on');
   pauseQueue(); // 先讓成品出來，背景的整頁處理稍後再跑
   try {
     await whenReady();
@@ -654,26 +653,25 @@ async function burstShow(p, anim) {
       if (!alive()) return;
       drawTo(base, r0); burst.ar = r0.width / r0.height; burstLayout();
       clip.style.clipPath = 'inset(0 0 100% 0)'; pw.style.visibility = 'visible'; spin.classList.remove('on');
-      const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); burst.raf = requestAnimationFrame(lp); }; burst.raf = requestAnimationFrame(lp);
+      burst.sw = sweepRun('res', 1200, (q, f) => { bandAtPct(band, q); if (f) clip.style.clipPath = `inset(0 0 ${(1 - q) * 100}% 0)`; });
     }
     const r = await job(f1, p.mode, pageAdjOf(p));
     if (!alive()) return;
-    cancelAnimationFrame(burst.raf); drawTo(outC, r); spin.classList.remove('on');
+    drawTo(outC, r); spin.classList.remove('on');
     if (!anim) {
       base.width = base.height = 1; burst.ar = r.width / r.height; burstLayout();
       clip.style.clipPath = 'none'; band.style.display = 'none'; pw.style.visibility = 'visible'; return;
     }
-    sfxPlay('scan');
-    const s0 = performance.now();
-    const rev = (now) => {
-      const sp = clamp01((now - s0) / 800), e = easeIO(sp);
-      clip.style.clipPath = `inset(0 0 ${(1 - e) * 100}% 0)`; bandAt(e);
-      if (sp < 1 && alive()) burst.raf = requestAnimationFrame(rev); else band.style.display = 'none';
-    };
-    burst.raf = requestAnimationFrame(rev);
+    // 4.0：已掃過的部分淡入成品，剩下的跟著掃描光刷出來，到底「叮」
+    const sw = burst.sw;
+    clip.style.clipPath = `inset(0 0 ${(1 - sw.p) * 100}% 0)`; clip.style.opacity = 0; clip.style.transition = 'opacity .2s';
+    requestAnimationFrame(() => { clip.style.opacity = 1; });
+    await sw.done();
+    if (!alive()) return;
+    burst.sw = null; band.style.display = 'none'; clip.style.clipPath = 'none'; clip.style.transition = '';
   } catch (e) {
     console.warn('burst result', e);
-    if (alive()) { spin.classList.remove('on'); clip.style.clipPath = 'none'; band.style.display = 'none'; pw.style.visibility = 'visible'; }
+    if (alive()) { if (burst.sw) { burst.sw.stop(); burst.sw = null; } spin.classList.remove('on'); clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; pw.style.visibility = 'visible'; }
   } finally { if (alive()) resumeQueue(); }
 }
 $('#burstNext').onclick = () => openCamera();
@@ -1334,7 +1332,7 @@ async function capture(sig, full, quadAt, userPress) {
   const fxOn = animOn(), now2crop = !settings.cropLater;
   const fxFrame = fxOn ? fxGrab(full || v) : null;
   let fx = null;
-  const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop); };
+  const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop ? (settings.autoAI ? 'ai' : 'crop') : false); };
   // 3.1.4：稍後裁切有動畫時，存照片（12 MP 轉 JPEG）、精算四角、存資料庫這些重活等紙飛進縮圖後才做。
   // 作者錄影：動畫在掃描光那段一頓一頓、飛進縮圖幾乎跳過——這些工作在主畫面執行，把動畫卡住。
   // 等待期間按「完成」或切到背景：先把動畫收掉，等這張存好再結束（finishLive）
@@ -1828,7 +1826,10 @@ function sfxBuild(name) {
     const a = out(0.2); add(a, click(1), 0); add(a, click(0.7), 0.075);
     return norm(a, 0.9);
   }
-  // 掃描：0.8 秒柔和的「刷—」（雜訊帶通由低往高掃）＋一點上滑的音色，0.78 秒時「叮」
+  if (name === 'ding') { // 4.0：只留原本掃描音效最後的「叮」（刷的聲音拿掉）；用同一段合成再取 0.78 秒之後，音量與音色和 3.1 一樣
+    const a = sfxBuild('scan'); return a.slice(Math.round(0.78 * sr));
+  }
+  // 掃描（3.1；4.0 起只用來取「叮」）：0.8 秒柔和的「刷—」（雜訊帶通由低往高掃）＋一點上滑的音色，0.78 秒時「叮」
   const D = 0.8, n = Math.round(D * sr), a = out(1.05);
   const sw = new Float32Array(n); let lp = 0, hp = 0, px = 0, m = 0;
   for (let i = 0; i < n; i++) {
@@ -1843,7 +1844,7 @@ function sfxBuild(name) {
   add(a, ch, 0.78);
   return norm(a, 0.8);
 }
-const SFX_GAIN = { shutter: 0.4, scan: 0.45 }; // 提示音：比一般影片聲音小一點
+const SFX_GAIN = { shutter: 0.4, scan: 0.45, ding: 0.45 }; // 提示音：比一般影片聲音小一點
 function sfxPlay(name) {
   if (settings.sound === false || !sfx.ctx) return;
   try {
@@ -1878,6 +1879,42 @@ function fxGrab(src) {
   try { c.getContext('2d').drawImage(src, 0, 0, c.width, c.height); } catch (_) { return null; }
   return c;
 }
+/* 4.0：等待時的掃描光只刷一遍，速度跟著處理時間走（不再循環）。
+   App 拿不到真正的處理進度，所以用這支手機以往的實際時間當預估（ETA_KEY，各種等待分開記，指數平均）：
+   到預估時間時約 82%，之後越來越慢、最多到 95%；處理完成時把剩下的刷完（至少 0.22 秒、整趟至少 0.8 秒），到底時「叮」。
+   掃描光用 transform 平移（交給圖形處理器，主執行緒忙時比較不會頓），不再每格改 top／height。 */
+const ETA_KEY = 'cocoscan-eta';
+function etaGet(k, d) { try { const v = JSON.parse(localStorage.getItem(ETA_KEY) || '{}')[k]; return v > 0 ? v : d; } catch (_) { return d; } }
+function etaPut(k, ms) {
+  if (!(ms >= 0)) return;
+  try { const o = JSON.parse(localStorage.getItem(ETA_KEY) || '{}'), old = o[k]; o[k] = Math.round(Math.min(20000, Math.max(150, old ? old * 0.6 + ms * 0.4 : ms))); localStorage.setItem(ETA_KEY, JSON.stringify(o)); } catch (_) {}
+}
+const etaP = (t, E) => 0.95 * (1 - Math.exp((-2 * t) / Math.max(800, E)));
+const finishDur = (p0, el) => Math.max(220, (1 - p0) * 700, 800 - el);
+const finishP = (p0, u) => p0 + (1 - p0) * (1 - Math.pow(1 - clamp01(u), 1.6));
+// 成品畫面（#capRes、連拍 #burstPw）用：draw(p, finishing) 每格畫；done() 處理完成時呼叫，回傳刷到底的 Promise
+function sweepRun(key, def, draw) {
+  const t0 = performance.now(), E = etaGet(key, def);
+  let fin = null, p = 0, raf = 0, stopped = false, resolveEnd;
+  const end = new Promise((r) => { resolveEnd = r; });
+  const tick = (now) => {
+    if (stopped) return;
+    const e = Math.max(0, now - t0);
+    p = fin ? finishP(fin.p0, (e - fin.e) / fin.dur) : etaP(e, E);
+    draw(p, !!fin);
+    if (fin && p >= 1) { stopped = true; sfxPlay('ding'); resolveEnd(); return; }
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+  return {
+    get p() { return p; },
+    done() { if (!fin && !stopped) { const e = performance.now() - t0; etaPut(key, e); fin = { e, p0: p, dur: finishDur(p, e) }; } return end; },
+    stop() { stopped = true; cancelAnimationFrame(raf); resolveEnd(); },
+  };
+}
+// 成品圖層上的掃描光：高 16%，用自身高度的百分比平移（16% × 6.25 = 100%）
+function bandInit(band) { Object.assign(band.style, { display: 'none', left: '0', width: '100%', top: '-16%', height: '16%', transform: '' }); }
+function bandAtPct(band, p) { band.style.display = 'block'; band.style.transform = `translateY(${p * 625}%)`; band.style.opacity = p < 0.85 ? 1 : 1 - (p - 0.85) / 0.15; }
 const capFx = { cur: null };
 // frame：拍下那一格；quad：0～1 四角（相對那一格）；stay：立即裁切（掃完停住、掃描光循環，release() 後 ready 才完成）
 // 回傳 { landed（飛進縮圖）, ready（立即裁切可以進框選了）, release(), stop() }
@@ -1900,15 +1937,19 @@ function playCapFx(frame, quad, stay) {
   const rx = st.left + (st.width - rw) / 2, ry = st.top + (st.height - rh) / 2;
   const RT = [[rx, ry], [rx + rw, ry], [rx + rw, ry + rh], [rx, ry + rh]];
   const T = { f0: 0.08, f1: 0.4, s0: 0.4, s1: 1.2, y1: 1.5 };
-  let resolveLand, resolveReady, released = !stay, t0 = performance.now(), loop0 = 0, raf = 0, landedDone = false, scanned = false;
+  // stay：立即裁切時是等待種類（'ai'＝等 AI 框選、'crop'＝只等一般偵測），掃描光照這種等待以往的時間走
+  const etaK = stay ? 'cap-' + stay : null, E = stay ? etaGet(etaK, stay === 'ai' ? 1500 : 300) : 0;
+  let resolveLand, resolveReady, released = !stay, t0 = performance.now(), raf = 0, landedDone = false, dinged = false, fin = null, pCur = 0;
   const landed = new Promise((r) => { resolveLand = r; }), ready = new Promise((r) => { resolveReady = r; });
   pw.style.transform = ''; pw.style.opacity = 1; dim.style.opacity = 0; band.style.display = 'none'; clip.style.clipPath = 'inset(0 0 100% 0)';
   root.classList.add('on');
-  const placeBand = (p) => {
-    const y = ry + rh * p, bh = rh * 0.16;
-    Object.assign(band.style, { display: 'block', left: rx + 'px', width: rw + 'px', top: (y - bh) + 'px', height: bh + 'px', opacity: p < 0.85 ? 1 : 1 - (p - 0.85) / 0.15 });
+  const bh = rh * 0.16;
+  Object.assign(band.style, { left: rx + 'px', width: rw + 'px', top: (ry - bh) + 'px', height: bh + 'px', transform: '' });
+  const placeBand = (p) => { band.style.display = 'block'; band.style.transform = `translateY(${rh * p}px)`; band.style.opacity = p < 0.85 ? 1 : 1 - (p - 0.85) / 0.15; };
+  const h = {
+    landed, ready, stop,
+    release() { if (!released) { released = true; etaPut(etaK, Math.max(0, performance.now() - t0 - T.s0 * 1000)); } },
   };
-  const h = { landed, ready, release() { released = true; }, stop };
   function stop() {
     cancelAnimationFrame(raf); clearTimeout(raf); root.classList.remove('on'); band.style.display = 'none';
     paper.width = paper.height = scan.width = scan.height = 1; // 3.1.1：釋放大張畫布（iPhone 圖層記憶體吃緊時相機畫面會被畫小）
@@ -1922,17 +1963,22 @@ function playCapFx(frame, quad, stay) {
     const D = QS.map((p, i) => [p[0] + (RT[i][0] - p[0]) * k, p[1] + (RT[i][1] - p[1]) * k]);
     paper.style.transform = scan.style.transform = homog(QP, D);
     dim.style.opacity = 0.82 * clamp01((t - T.f0) / (T.f1 - T.f0));
-    if (t >= T.s0 && !scanned) { scanned = true; sfxPlay('scan'); }
-    const sp = clamp01((t - T.s0) / (T.s1 - T.s0));
-    clip.style.clipPath = `inset(0 0 ${Math.max(0, innerHeight - (ry + rh * easeIO(sp)))}px 0)`;
-    if (t >= T.s0 && sp < 1) placeBand(easeIO(sp));
-    if (sp >= 1) {
-      if (stay) {
-        // 立即裁切：等 AI／偵測做完，掃描光循環
-        // 等 AI 時掃描光循環：跟著螢幕刷新（3.1.1 降到 15 次、3.1.2 用計時器 40 次，和螢幕刷新對不上、間隔不均反而卡；3.1.3 改回，弱 Android 已預設關動畫）
-        if (!released) { if (!loop0) loop0 = now; placeBand(easeIO(((now - loop0) / 800) % 1)); raf = requestAnimationFrame(frameFn); return; }
-        band.style.display = 'none'; resolveReady(); return; // 停在攤平的畫面，等進框選畫面後再 stop()
+    // 掃描：稍後裁切固定 0.8 秒；立即裁切跟著等待時間走、只刷一遍（4.0，取代 3.1 的循環），刷到底「叮」
+    const e = Math.max(0, (t - T.s0) * 1000);
+    let p = 0;
+    if (t >= T.s0) {
+      if (!stay) p = easeIO(clamp01(e / 800));
+      else {
+        if (released && !fin) fin = { e, p0: pCur, dur: finishDur(pCur, e) };
+        p = fin ? finishP(fin.p0, (e - fin.e) / fin.dur) : etaP(e, E);
       }
+      pCur = p;
+    }
+    clip.style.clipPath = `inset(0 0 ${Math.max(0, innerHeight - (ry + rh * p))}px 0)`;
+    if (t >= T.s0 && p < 1) placeBand(p);
+    if (p >= 1) {
+      if (!dinged) { dinged = true; sfxPlay('ding'); }
+      if (stay) { band.style.display = 'none'; resolveReady(); return; } // 停在攤平的畫面，等進框選畫面後再 stop()
       band.style.display = 'none';
       const f = easeIn3(clamp01((t - T.s1) / (T.y1 - T.s1)));
       const tb = $('#liveThumb').getBoundingClientRect(), sc = 1 + (tb.width / rw - 1) * f;
@@ -1962,14 +2008,13 @@ function showCapResult(pageId) {
   const el = $('#capRes'), pw = el.querySelector('.cr-pw'), base = el.querySelector('.cr-base'), outC = el.querySelector('.cr-out');
   const clip = el.querySelector('.cr-clip'), band = el.querySelector('.cr-band'), spin = el.querySelector('.cr-spin');
   const anim = animOn();
-  let raf = 0, done = false;
+  let sw = null, done = false;
   el.style.background = ''; el.querySelector('.cr-top').style.visibility = ''; el.querySelector('.cr-bar').style.visibility = '';
   base.width = base.height = outC.width = outC.height = 1; pw.style.width = '0px';
-  clip.style.clipPath = 'inset(0 0 100% 0)'; band.style.display = 'none'; spin.classList.toggle('on', true);
+  clip.style.clipPath = 'inset(0 0 100% 0)'; clip.style.opacity = ''; clip.style.transition = ''; bandInit(band); spin.classList.toggle('on', true);
   el.classList.add('on');
-  const bandAt = (p) => { Object.assign(band.style, { display: 'block', left: '0', width: '100%', top: (p * 100 - 16) + '%', height: '16%', opacity: p < 0.85 ? 1 : 1 - (p - 0.85) / 0.15 }); };
   const result = new Promise((res) => {
-    capRes.resolve = (v) => { if (done) return; done = true; cancelAnimationFrame(raf); clearTimeout(raf); capRes.resolve = null; res(v); };
+    capRes.resolve = (v) => { if (done) return; done = true; if (sw) sw.stop(); capRes.resolve = null; res(v); };
   });
   $('#crEdit').onclick = () => { el.classList.remove('on'); capRes.resolve && capRes.resolve('edit'); };
   $('#crOk').onclick = () => capRes.resolve && capRes.resolve('ok');
@@ -1983,20 +2028,18 @@ function showCapResult(pageId) {
       const r0 = await job(f0, 'original', fillAdj('original'));
       if (done) return;
       drawTo(base, r0); capResLayout(r0.width / r0.height);
-      if (anim) { spin.classList.remove('on'); const l0 = performance.now(); const lp = (now) => { bandAt(easeIO(((now - l0) / 800) % 1)); raf = requestAnimationFrame(lp); }; raf = requestAnimationFrame(lp); }
+      if (anim) { spin.classList.remove('on'); sw = sweepRun('res', 1200, (q, f) => { bandAtPct(band, q); if (f) clip.style.clipPath = `inset(0 0 ${(1 - q) * 100}% 0)`; }); }
       const r = await job(f1, p.mode, pageAdjOf(p));
       if (done) return;
-      cancelAnimationFrame(raf); clearTimeout(raf); drawTo(outC, r); spin.classList.remove('on');
+      drawTo(outC, r); spin.classList.remove('on');
       if (!anim) { clip.style.clipPath = 'none'; band.style.display = 'none'; return; }
-      sfxPlay('scan');
-      const s0 = performance.now();
-      const rev = (now) => {
-        const sp = clamp01((now - s0) / 800), e = easeIO(sp);
-        clip.style.clipPath = `inset(0 0 ${(1 - e) * 100}% 0)`; bandAt(e);
-        if (sp < 1) raf = requestAnimationFrame(rev); else band.style.display = 'none';
-      };
-      raf = requestAnimationFrame(rev);
-    } catch (e) { console.warn('capRes', e); spin.classList.remove('on'); clip.style.clipPath = 'none'; }
+      // 4.0：已掃過的部分淡入成品，剩下的跟著掃描光刷出來
+      clip.style.clipPath = `inset(0 0 ${(1 - sw.p) * 100}% 0)`; clip.style.opacity = 0; clip.style.transition = 'opacity .2s';
+      requestAnimationFrame(() => { clip.style.opacity = 1; });
+      await sw.done();
+      if (done) return;
+      band.style.display = 'none'; clip.style.clipPath = 'none'; clip.style.transition = '';
+    } catch (e) { console.warn('capRes', e); if (sw) sw.stop(); spin.classList.remove('on'); clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; }
   })();
   return result;
 }
@@ -3999,7 +4042,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '3.1.7';
+const APP_VER = '4.0';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4024,9 +4067,13 @@ const CHANGELOG = [
     { t: '自動 AI 框選預設開啟，並於第一次拍攝時詢問下載', since: '3.0' },
     { t: '加入主畫面說明，並新增影片教學', since: '3.0' },
     { t: '框選畫面支援雙指縮放；相簿匯入與高畫質拍照也能自動 AI 框選', since: '3.0.1' },
-    { t: '即時掃描加框選動畫', since: '3.1' },
-    { t: '最佳化立即裁切：編輯時暫停相機，減少耗電與發熱', since: '3.1.5' },
-    { t: '最佳化高畫質拍照流程體驗', since: '3.1.6' },
+  ] },
+  // 4.0：3.1～3.1.7 沒上正式版，整理成 v4 一組（作者定的文字）
+  { v: 'v4', items: [
+    { t: '即時掃描、高畫質拍照加入框選動畫與音效', since: '4.0' },
+    { t: '最佳化立即裁切：編輯時暫停相機，減少耗電與發熱', since: '4.0' },
+    { t: '最佳化高畫質拍照流程體驗', since: '4.0' },
+    { t: '新增樂譜拍攝自動轉向功能，將自動偵測樂譜的方向', since: '4.0' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
