@@ -601,9 +601,9 @@ const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageI
 function startBurst(docId) {
   Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null });
 }
-async function burstAdd(blob, corners, curve) {
+async function burstAdd(blob, corners, curve, rotation) {
   if (!burst.docId) burst.docId = (await createDoc()).id;
-  const page = await addPage(burst.docId, blob, corners, curve);
+  const page = await addPage(burst.docId, blob, corners, curve, false, rotation || 0);
   burst.count++; burst.lastPageId = page.id; burst.fresh = true;
   return page;
 }
@@ -682,11 +682,11 @@ $('#burstEdit').onclick = async () => {
   if (!burst.lastPageId) return;
   const p = await DB.get('pages', burst.lastPageId); if (!p) return;
   openCrop({
-    blob: p.original, corners: p.corners, curve: p.curve || null,
-    onConfirm: async (c, cv, edited) => {
+    blob: p.original, corners: p.corners, curve: p.curve || null, rotation: p.rotation || 0,
+    onConfirm: async (c, cv, edited, rot) => {
       sfxPrime();
       const q = await DB.get('pages', p.id);
-      if (q) { q.corners = c; q.curve = cv; if (edited) q.cropUser = true; await DB.put('pages', q); enqueue(q.id); burst.fresh = true; }
+      if (q) { q.corners = c; q.curve = cv; q.rotation = rot; if (edited) q.cropUser = true; await DB.put('pages', q); enqueue(q.id); burst.fresh = true; }
       toBurst();
     },
   });
@@ -711,6 +711,55 @@ async function finishBurst() {
   await renderDoc(); show('doc');
 }
 $('#burstDone').onclick = finishBurst;
+
+// 3.1.7：自動轉正。iPhone 系統相機平拿往下拍時常把照片存成躺的（相機自己判斷錯方向，網頁管不到）。
+// 拉正後看線條方向：五線譜、歌詞、文字行放正時是橫的，躺著時變直的。用「每一條窄帶裡的行／列輪廓起伏」比較橫、直兩個方向
+// （書頁彎曲時長線會斷，所以分 16 條窄帶各自算）。分數 = 橫 / (橫 + 直)；樣張 57 張直式＋4 張橫式：放正 ≥ 0.54、躺著 ≤ 0.46。
+// 低於 0.45 才轉（明顯躺著），轉的方向固定順時針 90 度（作者實測大多是這個方向；轉錯可在框選畫面再按「向右轉」）。
+// 看的是線條不是長寬，所以橫式樂譜不會被轉。任何錯誤都當作不轉。
+function lineScore(g, W, H) {
+  // 自適應二值化（25×25 區域平均減 5 以下算墨跡，等同 OpenCV ADAPTIVE_THRESH_MEAN_C）
+  const I = new Float64Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) { let s = 0; for (let x = 0; x < W; x++) { s += g[y * W + x]; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + s; } }
+  const b = new Uint8Array(W * H), R = 12;
+  for (let y = 0; y < H; y++) {
+    const y0 = Math.max(0, y - R), y1 = Math.min(H, y + R + 1);
+    for (let x = 0; x < W; x++) {
+      const x0 = Math.max(0, x - R), x1 = Math.min(W, x + R + 1);
+      const m = (I[y1 * (W + 1) + x1] - I[y0 * (W + 1) + x1] - I[y1 * (W + 1) + x0] + I[y0 * (W + 1) + x0]) / ((y1 - y0) * (x1 - x0));
+      b[y * W + x] = g[y * W + x] <= m - 5 ? 1 : 0;
+    }
+  }
+  const K = 16;
+  const prof = (rows, cols, at) => { // 每條窄帶：沿 rows 方向的輪廓，相鄰差的平均
+    const st = Math.floor(cols / K); let v = 0;
+    for (let i = 0; i < K; i++) {
+      let prev = -1, acc = 0;
+      for (let r = 0; r < rows; r++) { let s = 0; for (let c = i * st; c < (i + 1) * st; c++) s += at(r, c); s /= st; if (prev >= 0) acc += Math.abs(s - prev); prev = s; }
+      v += acc / (rows - 1);
+    }
+    return v;
+  };
+  const h = prof(H, W, (r, c) => b[r * W + c]), v = prof(W, H, (r, c) => b[c * W + r]);
+  return h / (h + v + 1e-9);
+}
+async function autoRot(blob, corners, curve) {
+  try {
+    await whenReady();
+    const { img, url } = await loadImg(blob);
+    const f = smallFrame(img, 1600); URL.revokeObjectURL(url);
+    const r = await wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners, curve: curve || null, upscale: 'off', rotation: 0, mode: 'original', params: fillAdj('original') }, [f.data.buffer]);
+    const s = Math.min(1, 900 / Math.max(r.width, r.height)), W = Math.max(32, Math.round(r.width * s)), H = Math.max(32, Math.round(r.height * s));
+    const src = canvasOf(r.width, r.height); src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
+    const c = canvasOf(W, H), x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(src, 0, 0, W, H); src.width = src.height = 0;
+    const d = x.getImageData(0, 0, W, H).data, g = new Float32Array(W * H);
+    for (let i = 0; i < W * H; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+    c.width = c.height = 0;
+    const sc = lineScore(g, W, H);
+    autoRot.last = sc;
+    return sc < 0.45 ? 90 : 0;
+  } catch (e) { console.warn('autoRot', e); return 0; }
+}
 
 // 3.0.1：高畫質拍照、相簿匯入也跟著「自動 AI 框選」開關（開著而且 AI 已下載才用）。
 // 回傳 { corners, curve }；AI 判斷不適合或失敗回傳 { fail, msg }（呼叫的地方保留一般偵測的框）
@@ -737,15 +786,16 @@ $('#fileCamera').addEventListener('change', async (e) => {
     if (r.corners) { corners = r.corners; curve = r.curve; }
     else toast(r.fail === 'reject' ? 'AI 判斷不適合，保留原框' : 'AI 框選失敗：' + (r.msg || '未知原因'));
   }
+  const rot0 = await autoRot(blob, corners, curve); // 3.1.7：iPhone 平拿拍照常把照片存成躺的，躺著就自動順時針轉正
   unbusy();
   if (settings.confirmCrop) {
     openCrop({
-      blob, corners, curve, retake: true, burst: true,
-      onConfirm: async (c, cv, edited) => { sfxPrime(); const pg = await burstAdd(blob, c, cv); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
+      blob, corners, curve, rotation: rot0, retake: true, burst: true,
+      onConfirm: async (c, cv, edited, rot) => { sfxPrime(); const pg = await burstAdd(blob, c, cv, rot); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
       onRetake: () => openCamera(),
     });
   } else {
-    await burstAdd(blob, corners, curve);
+    await burstAdd(blob, corners, curve, rot0);
     toBurst();
     toast(`已加入第 ${burst.count} 張`);
   }
@@ -767,7 +817,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
         const r = await aiCorners(blob);
         if (r.corners) { c = r.corners; cv = r.curve; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
       }
-      await addPage(docId, blob, c, cv);
+      await addPage(docId, blob, c, cv, false, await autoRot(blob, c, cv)); // 3.1.7：躺著的自動轉正
     } catch (err) { toast(err.message); }
   }
   unbusy();
@@ -1519,16 +1569,16 @@ function openLiveCrop(page, blob, corners, curve, replace) {
   live.paused = true;
   camPause(); // 3.1.5
   openCrop({
-    blob, corners, curve: curve || null, retake: true, liveCrop: true, replace,
-    onConfirm: async (c, cv, edited) => {
+    blob, corners, curve: curve || null, rotation: page.rotation || 0, retake: true, liveCrop: true, replace,
+    onConfirm: async (c, cv, edited, rot) => {
       const p = await DB.get('pages', page.id);
       if (!p) { history.back(); return; }
-      p.corners = c; p.curve = cv; delete p.needCrop;
+      p.corners = c; p.curve = cv; p.rotation = rot; delete p.needCrop;
       if (edited) p.cropUser = true;
       await DB.put('pages', p);
       // 3.1：先看成品（#capRes）；「繼續編輯」回到框選，「確定」才回到拍攝畫面
       const act = await showCapResult(p.id);
-      if (act === 'edit') { openLiveCrop(page, blob, c, cv, true); return; }
+      if (act === 'edit') { openLiveCrop(p, blob, c, cv, true); return; }
       if (act === 'ok') { capRes.flying = true; history.back(); try { await capResFly(); } finally { capRes.flying = false; } }
       if (live.lastPageId === p.id) refreshLiveThumb(p.id);
       enqueue(p.id);
@@ -2056,25 +2106,70 @@ async function detectCurveOn(img, corners) {
   } catch (e) { console.warn('detectCurve', e); return null; }
 }
 
+// 3.1.7：框選畫面可以轉向（甲：照片跟著轉，所見即所得）。
+// 頁面的四角、曲線一律存「原始照片」座標，旋轉另存 page.rotation（順時針）；框選畫面裡用「轉過的照片」座標操作，
+// 打開時換算過去、按確定時換算回來。順時針 90 度：(x, y) → (1 - y, x)，角的順序跟著輪換（左上永遠是第一個）。
+const rotPt = (p, r) => (r === 90 ? [1 - p[1], p[0]] : r === 180 ? [1 - p[0], 1 - p[1]] : r === 270 ? [p[1], 1 - p[0]] : [p[0], p[1]]);
+function rotQuad(C, curve, r) {
+  r = ((r % 360) + 360) % 360;
+  const k = r / 90;
+  const c2 = [0, 1, 2, 3].map((i) => rotPt(C[(i - k + 4) % 4], r));
+  const cv2 = curve ? [0, 1, 2, 3].map((i) => curve[(i - k + 4) % 4].map((p) => rotPt(p, r))) : null;
+  return { corners: c2, curve: cv2 };
+}
+function rotCanvas(src, r) {
+  if (!r) return src;
+  const c = r === 180 ? canvasOf(src.width, src.height) : canvasOf(src.height, src.width), x = c.getContext('2d');
+  x.translate(c.width / 2, c.height / 2); x.rotate((r * Math.PI) / 180); x.drawImage(src, -src.width / 2, -src.height / 2);
+  return c;
+}
+// 框選畫面顯示的照片：轉過的就把畫布存成圖（只給畫面、偵測、AI 用；存檔用的仍是原始照片）
+async function setCropView(c) {
+  if (c.viewUrl) { URL.revokeObjectURL(c.viewUrl); c.viewUrl = null; }
+  let url = c.url;
+  if (c.rot) { const b = await toBlob(c.loupeSrc, 'image/jpeg', 0.92); if (b) { c.viewUrl = URL.createObjectURL(b); url = c.viewUrl; } }
+  const ci = $('#cropImg');
+  await new Promise((res) => { ci.onload = ci.onerror = () => res(); ci.src = url; });
+  ci.onload = ci.onerror = null;
+}
+function cropUrls(c) { if (c.url) URL.revokeObjectURL(c.url); if (c.viewUrl) URL.revokeObjectURL(c.viewUrl); }
 async function openCrop(opts) {
-  if (cropCtx && cropCtx.url) URL.revokeObjectURL(cropCtx.url);
+  if (cropCtx) cropUrls(cropCtx);
   const { img, url } = await loadImg(opts.blob);
-  const curve = opts.curve ? normCurve(opts.corners, opts.curve) : null;
+  const rot = ((opts.rotation || 0) % 360 + 360) % 360;
+  const curve0 = opts.curve ? normCurve(opts.corners, opts.curve) : null;
+  const v = rotQuad(opts.corners, curve0, rot);
   // 放大鏡的取圖來源：把整張照片畫進畫布（整張繪製時各瀏覽器都會正確套用照片方向），
   // 之後只從這張畫布取局部，避免 iPhone Safari 取局部時沒套用方向而錯位
   const ls = Math.min(1, 2400 / Math.max(img.naturalWidth, img.naturalHeight));
   const lc = canvasOf(Math.round(img.naturalWidth * ls), Math.round(img.naturalHeight * ls));
   const lctx = lc.getContext('2d'); lctx.imageSmoothingQuality = 'high';
   lctx.drawImage(img, 0, 0, lc.width, lc.height);
-  cropCtx = Object.assign({}, opts, { url, nat: [img.naturalWidth, img.naturalHeight], loupeSrc: lc, corners: opts.corners.map((p) => p.slice()), curve, curveMode: false, c0: opts.corners.map((p) => p.slice()), cv0: JSON.stringify(curve && !curveIsStraight(opts.corners, curve) ? curve : null), drag: null, pipKey: 'crop:' + Date.now() });
-  pipInit(cropCtx);
-  const ci = $('#cropImg'); ci.src = url;
+  const nat = rot === 90 || rot === 270 ? [img.naturalHeight, img.naturalWidth] : [img.naturalWidth, img.naturalHeight];
+  cropCtx = Object.assign({}, opts, { url, rot, nat, loupeSrc: rotCanvas(lc, rot), corners: v.corners, curve: v.curve, curveMode: false, o0: opts.corners.map((p) => p.slice()), ocv0: JSON.stringify(curve0 && !curveIsStraight(opts.corners, curve0) ? curve0 : null), drag: null, pipKey: 'crop:' + Date.now() });
+  const c = cropCtx;
+  pipInit(c);
+  await setCropView(c);
+  if (cropCtx !== c) return;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
   $('#cropCancel').textContent = opts.liveCrop ? '稍後裁切' : '取消';
   updateCurveBtn();
   if (opts.replace) { history.replaceState({ s: 'crop', doc: state.docId, i: state.pageIndex }, ''); show('crop'); } else go('crop'); // 3.1 成品畫面按「繼續編輯」：不多疊一層返回紀錄
   requestAnimationFrame(layoutCrop);
 }
+// 3.1.7：向右轉（順時針 90 度）：照片、框、曲線一起轉，放大鏡與成品預覽換成轉過的照片
+$('#cropRot').onclick = async () => {
+  const c = cropCtx; if (!c || c.rotating) return;
+  c.rotating = true;
+  try {
+    const v = rotQuad(c.corners, c.curve, 90);
+    c.rot = (c.rot + 90) % 360; c.corners = v.corners; c.curve = v.curve;
+    c.loupeSrc = rotCanvas(c.loupeSrc, 90); c.nat = [c.nat[1], c.nat[0]];
+    c.pipKey = 'crop:' + Date.now(); pipInit(c);
+    await setCropView(c);
+    if (cropCtx === c) layoutCrop();
+  } finally { c.rotating = false; }
+};
 function updateCurveBtn() {
   const b = $('#cropCurve');
   b.classList.toggle('on', !!(cropCtx && cropCtx.curveMode));
@@ -2470,16 +2565,19 @@ $('#cropOk').onclick = async () => {
   const q = c.corners;
   const area = Math.abs([0, 1, 2, 3].reduce((a, i) => { const j = (i + 1) % 4; return a + q[i][0] * q[j][1] - q[j][0] * q[i][1]; }, 0)) / 2;
   if (area < 0.01) { toast('範圍太小了'); return; }
+  if (c.rotating) return;
   cropCtx = null;
-  URL.revokeObjectURL(c.url);
+  cropUrls(c);
   pipClose();
-  const cv = c.curve && !curveIsStraight(q, c.curve) ? c.curve : null;
-  // 1.31：使用者有沒有改過範圍（和打開時比）；有的話記成「自己調整過範圍」，統一調整的 AI 框選會先詢問
-  const edited = !nearSame(q, c.c0) || JSON.stringify(cv) !== c.cv0;
-  await c.onConfirm(q, cv, edited);
+  // 3.1.7：換算回原始照片座標，旋轉另外交給呼叫的地方存進 page.rotation
+  const o = rotQuad(q, c.curve, 360 - c.rot);
+  const cv = o.curve && !curveIsStraight(o.corners, o.curve) ? o.curve : null;
+  // 1.31：使用者有沒有改過範圍（和打開時比，原始照片座標；只轉向不算）；有的話記成「自己調整過範圍」，統一調整的 AI 框選會先詢問
+  const edited = !nearSame(o.corners, c.o0) || JSON.stringify(cv) !== c.ocv0;
+  await c.onConfirm(o.corners, cv, edited, c.rot);
 };
 $('#cropCancel').onclick = () => history.back();
-$('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
+$('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; if (c) cropUrls(c); pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
 $('#cropPrev').onclick = () => ($('#pipFull').classList.contains('show') ? pipFullClose() : pipFullOpen()); // 3.1：再按一次回到框選
 
 /* ---------- 裁切即時成品預覽（1.13 方案 B，1.14 改對角） ----------
@@ -2950,8 +3048,8 @@ $('#pgRotR').onclick = () => updatePage({ rotation: ((viewPage.rotation || 0) + 
 $('#pgCrop').onclick = () => {
   const p = viewPage;
   openCrop({
-    blob: p.original, corners: p.corners, curve: p.curve || null,
-    onConfirm: async (c, cv, edited) => { history.back(); await updatePage(Object.assign({ corners: c, curve: cv, needCrop: false }, edited ? { cropUser: true } : {})); },
+    blob: p.original, corners: p.corners, curve: p.curve || null, rotation: p.rotation || 0,
+    onConfirm: async (c, cv, edited, rot) => { history.back(); await updatePage(Object.assign({ corners: c, curve: cv, rotation: rot, needCrop: false }, edited ? { cropUser: true } : {})); },
   });
 };
 // 1.25：往前移／往後移拿掉（文件頁可以拖曳排序），換成上一步／下一步
@@ -3901,7 +3999,7 @@ async function aiFrameDoc() {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '3.1.6';
+const APP_VER = '3.1.7';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
