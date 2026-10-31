@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 精修測試</title>
+<style>
+:root{--bg:#1C130E;--cream:#F6EFE6;--cocoa:#5a3b28;--gold:#F2C48D;--txt:#fff}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;-webkit-text-size-adjust:100%}
+.wrap{max-width:720px;margin:0 auto;padding:16px 16px 40px}
+h1{font-size:19px;margin:6px 0 4px}
+.note{font-size:13px;opacity:.75;line-height:1.6}
+.card{background:rgba(255,255,255,.07);border-radius:14px;padding:12px 14px;margin:12px 0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+button,label.btn{font:inherit;font-size:14.5px;border:0;border-radius:20px;padding:9px 16px;background:var(--cream);color:var(--cocoa);font-weight:700;cursor:pointer}
+button.alt{background:rgba(255,255,255,.12);color:#fff}
+button.on{outline:2px solid var(--gold)}
+button:disabled{opacity:.4}
+select{font:inherit;font-size:14px;border-radius:10px;padding:6px 8px}
+#log{font-size:13px;line-height:1.7;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;opacity:.9}
+.bar{height:8px;background:rgba(255,255,255,.12);border-radius:4px;overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;width:0;background:var(--gold);transition:width .2s}
+.view{position:relative;overflow:auto;background:#fff;border-radius:10px;max-height:70vh;-webkit-overflow-scrolling:touch}
+.view img{display:block;width:100%;height:auto;image-rendering:auto}
+.tabs button{padding:7px 12px;font-size:13.5px}
+</style>
+</head>
+<body><div class="wrap">
+<h1>AI 精修測試（不影響 App）</h1>
+<div class="note">選一張樂譜照片 → 自動框選拉正 → 比較「現行黑白」和「AI 精修後黑白」，並記錄這支手機要花多久。<br>AI：Real-ESRGAN 線稿模型（2.5 MB），先縮一半再放大 4 倍。</div>
+
+<div class="card">
+  <div class="row">
+    <label class="btn">選照片<input type="file" id="file" accept="image/*" hidden></label>
+    <span class="note">運算：</span>
+    <select id="ep"><option value="auto">自動（有 GPU 就用）</option><option value="webgpu">GPU（WebGPU）</option><option value="wasm">CPU</option></select>
+    <span class="note">AI 輸入長邊：</span>
+    <select id="inSide"><option value="1200">1200</option><option value="1600" selected>1600</option><option value="2000">2000</option></select>
+  </div>
+  <div class="bar"><i id="prog"></i></div>
+  <div id="log">準備中…</div>
+</div>
+
+<div class="card" id="res" style="display:none">
+  <div class="row tabs" style="margin-bottom:8px">
+    <button data-v="orig">原照片</button><button data-v="cur" class="on">現行黑白</button><button data-v="ai">AI 精修黑白</button><button data-v="aic">AI 精修（原色）</button>
+    <span style="flex:1"></span>
+    <button class="alt" data-z="1">1×</button><button class="alt" data-z="2">2×</button><button class="alt" data-z="4">4×</button>
+  </div>
+  <div class="view" id="view"><img id="img" alt=""></div>
+  <div class="note" style="margin-top:6px">放大後可以拖曳；切換分頁時位置不變，方便比較同一個地方。</div>
+</div>
+</div>
+
+<script src="lib/ai/ort.webgpu.min.js"></script>
+<script>
+const $ = (s) => document.querySelector(s);
+const logEl = $('#log'), prog = $('#prog');
+const log = (s) => { logEl.textContent += '\n' + s; };
+const MODEL = 'lib/ai/sr-anime.onnx', OUT_SIDE_MAX = 3200, TILE = 192, PAD = 12;
+ort.env.wasm.wasmPaths = new URL('lib/ai/', location.href).href;
+ort.env.wasm.numThreads = 1;
+
+// ---- 影像處理 worker（和 App 同一個 worker.js：框選、拉正、黑白） ----
+const worker = new Worker('worker.js');
+let wReady = false, wSeq = 0; const wPend = new Map();
+worker.onmessage = (e) => { const m = e.data; if (m.type === 'ready') { wReady = true; logEl.textContent = '已就緒，請選一張照片。'; return; } const p = wPend.get(m.id); if (!p) return; wPend.delete(m.id); m.ok ? p.res(m.result) : p.rej(new Error(m.error)); };
+function wcall(type, payload, transfer) { return new Promise((res, rej) => { const id = ++wSeq; wPend.set(id, { res, rej }); worker.postMessage(Object.assign({ id, type }, payload), transfer || []); }); }
+const until = (f) => new Promise((r) => { const t = setInterval(() => { if (f()) { clearInterval(t); r(); } }, 50); });
+
+const canvasOf = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+function frame(src, maxSide) { const w = src.naturalWidth || src.width, h = src.naturalHeight || src.height, s = Math.min(1, maxSide / Math.max(w, h)); const c = canvasOf(Math.round(w * s), Math.round(h * s)); const x = c.getContext('2d', { willReadFrequently: true }); x.imageSmoothingQuality = 'high'; x.drawImage(src, 0, 0, c.width, c.height); return x.getImageData(0, 0, c.width, c.height); }
+const toCanvas = (r) => { const c = canvasOf(r.width, r.height); c.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer || r.data.buffer), r.width, r.height), 0, 0); return c; };
+const loadImg = (blob) => new Promise((res, rej) => { const u = URL.createObjectURL(blob), i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = u; });
+// 黑白：App 出廠值（worker 會自己補齊沒給的數值）
+const BW = { mode: 'bw', params: {} };
+
+let sess = null, sessEP = '';
+async function getSess(want) {
+  const eps = want === 'auto' ? (navigator.gpu ? ['webgpu', 'wasm'] : ['wasm']) : [want];
+  for (const ep of eps) {
+    if (sess && sessEP === ep) return sess;
+    try { const t = performance.now(); sess = await ort.InferenceSession.create(MODEL, { executionProviders: [ep], graphOptimizationLevel: 'all' }); sessEP = ep; log(`AI 載入（${ep === 'webgpu' ? 'GPU' : 'CPU'}）${Math.round(performance.now() - t)} ms`); return sess; }
+    catch (e) { log(`${ep} 無法使用：${e.message}`); }
+  }
+  throw new Error('AI 無法載入');
+}
+
+// 分塊跑 AI：每塊 TILE×TILE（四周多讀 PAD 避免接縫），輸出 4 倍後直接縮成 scale 倍畫進結果畫布
+async function runSR(src, scale, onProg) {
+  const W = src.width, H = src.height, sctx = src.getContext('2d', { willReadFrequently: true });
+  const out = canvasOf(Math.round(W * scale), Math.round(H * scale)), octx = out.getContext('2d'); octx.imageSmoothingQuality = 'high';
+  const IN = TILE + PAD * 2, f = new Float32Array(3 * IN * IN), tmp = canvasOf(IN * 4, IN * 4), tctx = tmp.getContext('2d');
+  const nx = Math.ceil(W / TILE), ny = Math.ceil(H / TILE); let done = 0;
+  for (let ty = 0; ty < ny; ty++) for (let tx = 0; tx < nx; tx++) {
+    const x0 = tx * TILE, y0 = ty * TILE;
+    // 讀入（超出邊界就複製邊緣）
+    const sx = Math.max(0, x0 - PAD), sy = Math.max(0, y0 - PAD), ex = Math.min(W, x0 + TILE + PAD), ey = Math.min(H, y0 + TILE + PAD);
+    const d = sctx.getImageData(sx, sy, ex - sx, ey - sy).data, dw = ex - sx, dh = ey - sy, ox = x0 - PAD, oy = y0 - PAD, N = IN * IN;
+    for (let y = 0; y < IN; y++) { const yy = Math.min(dh - 1, Math.max(0, oy + y - sy)); for (let x = 0; x < IN; x++) { const xx = Math.min(dw - 1, Math.max(0, ox + x - sx)), k = (yy * dw + xx) * 4, i = y * IN + x; f[i] = d[k] / 255; f[N + i] = d[k + 1] / 255; f[2 * N + i] = d[k + 2] / 255; } }
+    const r = await sess.run({ [sess.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, IN, IN]) });
+    const y = r[sess.outputNames[0]].data, O = IN * 4, M = O * O, img = tctx.createImageData(O, O), p = img.data;
+    for (let i = 0; i < M; i++) { const a = i * 4; p[a] = Math.max(0, Math.min(255, y[i] * 255 + 0.5)); p[a + 1] = Math.max(0, Math.min(255, y[M + i] * 255 + 0.5)); p[a + 2] = Math.max(0, Math.min(255, y[2 * M + i] * 255 + 0.5)); p[a + 3] = 255; }
+    tctx.putImageData(img, 0, 0);
+    const tw = Math.min(TILE, W - x0), th = Math.min(TILE, H - y0);
+    octx.drawImage(tmp, PAD * 4, PAD * 4, tw * 4, th * 4, x0 * scale, y0 * scale, tw * scale, th * scale);
+    done++; onProg(done / (nx * ny));
+    if (done % 4 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+  return out;
+}
+
+const views = {}; let cur = 'cur', zoom = 1;
+function show(v) { if (!views[v]) return; cur = v; document.querySelectorAll('.tabs [data-v]').forEach((b) => b.classList.toggle('on', b.dataset.v === v)); const vw = $('#view'), fx = vw.scrollLeft / (vw.scrollWidth || 1), fy = vw.scrollTop / (vw.scrollHeight || 1); $('#img').src = views[v]; $('#img').onload = () => { vw.scrollLeft = fx * vw.scrollWidth; vw.scrollTop = fy * vw.scrollHeight; }; }
+document.querySelectorAll('.tabs [data-v]').forEach((b) => b.onclick = () => show(b.dataset.v));
+document.querySelectorAll('.tabs [data-z]').forEach((b) => b.onclick = () => { const vw = $('#view'), fx = (vw.scrollLeft + vw.clientWidth / 2) / vw.scrollWidth, fy = (vw.scrollTop + vw.clientHeight / 2) / vw.scrollHeight; zoom = +b.dataset.z; $('#img').style.width = zoom * 100 + '%'; vw.scrollLeft = fx * vw.scrollWidth - vw.clientWidth / 2; vw.scrollTop = fy * vw.scrollHeight - vw.clientHeight / 2; });
+const urlOf = (c) => new Promise((r) => c.toBlob((b) => r(URL.createObjectURL(b)), 'image/png'));
+
+$('#file').onchange = async (e) => {
+  const file = e.target.files[0]; if (!file) return; e.target.value = '';
+  logEl.textContent = ''; prog.style.width = '0'; $('#res').style.display = 'none';
+  for (const k in views) { URL.revokeObjectURL(views[k]); delete views[k]; }
+  try {
+    await until(() => wReady);
+    const t0 = performance.now();
+    const img = await loadImg(file);
+    log(`照片 ${img.naturalWidth}×${img.naturalHeight}`);
+    // 1. 框選＋拉正（原色），長邊最多 OUT_SIDE_MAX
+    const f9 = frame(img, 900); const det = await wcall('detect', { buffer: f9.data.buffer, width: f9.width, height: f9.height }, [f9.data.buffer]);
+    const corners = det && det.corners ? det.corners : [[0, 0], [1, 0], [1, 1], [0, 1]];
+    const big = frame(img, 4000);
+    const warped = await wcall('process', { buffer: big.data.buffer, width: big.width, height: big.height, corners, curve: null, upscale: 'off', rotation: 0, mode: 'original', params: {} }, [big.data.buffer]);
+    let page = toCanvas(warped);
+    if (Math.max(page.width, page.height) > OUT_SIDE_MAX) { const s = OUT_SIDE_MAX / Math.max(page.width, page.height), c = canvasOf(Math.round(page.width * s), Math.round(page.height * s)), x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(page, 0, 0, c.width, c.height); page = c; }
+    log(`拉正後頁面 ${page.width}×${page.height}（${Math.round(performance.now() - t0)} ms）`);
+    views.orig = await urlOf(page);
+    // 2. 現行黑白
+    let t = performance.now();
+    const pd = page.getContext('2d').getImageData(0, 0, page.width, page.height);
+    const curBW = await wcall('process', { buffer: pd.data.buffer, width: page.width, height: page.height, corners: [[0, 0], [1, 0], [1, 1], [0, 1]], curve: null, upscale: 'off', rotation: 0, mode: BW.mode, params: BW.params }, [pd.data.buffer]);
+    views.cur = await urlOf(toCanvas(curBW));
+    log(`現行黑白 ${Math.round(performance.now() - t)} ms`);
+    $('#res').style.display = ''; show('cur');
+    // 3. AI 精修：縮到輸入長邊 → 4 倍 → 縮回頁面原尺寸
+    const inSide = +$('#inSide').value, s = Math.min(1, inSide / Math.max(page.width, page.height));
+    const small = canvasOf(Math.round(page.width * s), Math.round(page.height * s)); { const x = small.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(page, 0, 0, small.width, small.height); }
+    await getSess($('#ep').value);
+    log(`AI 輸入 ${small.width}×${small.height}（${(small.width * small.height / 1e6).toFixed(2)} MP），開始處理…`);
+    t = performance.now();
+    const scale = page.width / small.width;
+    const sr = await runSR(small, scale, (p) => { prog.style.width = (p * 100).toFixed(1) + '%'; });
+    const aiMs = performance.now() - t;
+    log(`★ AI 精修 ${(aiMs / 1000).toFixed(1)} 秒（${sessEP === 'webgpu' ? 'GPU' : 'CPU'}，每百萬畫素 ${(aiMs / 1000 / (small.width * small.height / 1e6)).toFixed(1)} 秒）`);
+    views.aic = await urlOf(sr);
+    t = performance.now();
+    const sd = sr.getContext('2d').getImageData(0, 0, sr.width, sr.height);
+    const aiBW = await wcall('process', { buffer: sd.data.buffer, width: sr.width, height: sr.height, corners: [[0, 0], [1, 0], [1, 1], [0, 1]], curve: null, upscale: 'off', rotation: 0, mode: BW.mode, params: BW.params }, [sd.data.buffer]);
+    views.ai = await urlOf(toCanvas(aiBW));
+    log(`AI 後黑白 ${Math.round(performance.now() - t)} ms\n總共 ${((performance.now() - t0) / 1000).toFixed(1)} 秒。點「AI 精修黑白」比較。`);
+    show('ai');
+  } catch (err) { log('錯誤：' + (err && err.message ? err.message : err)); console.error(err); }
+};
+</script>
+</body>
+</html>
