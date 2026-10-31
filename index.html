@@ -40,6 +40,25 @@ window.__a2hsPrompt = null;
 window.addEventListener('beforeinstallprompt', function (e) { e.preventDefault(); window.__a2hsPrompt = e; });
 window.addEventListener('appinstalled', function () { window.__a2hsPrompt = null; });
 </script>
+<!-- 4.1.5：標準網址（測試版用同一份檔案，也指向正式版，搜尋排名集中在正式版）與給搜尋引擎看的 App 身分資料 -->
+<link rel="canonical" href="https://andywu1101.github.io/scanner/">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "伍線譜樂譜掃描",
+  "alternateName": ["伍線譜掃描", "伍線譜", "Sheet Music Scanner"],
+  "url": "https://andywu1101.github.io/scanner/",
+  "description": "用手機把樂譜、講義掃成清晰的 PDF：自動抓邊、彎曲書頁拉平、去雜點。免註冊，資料只存在自己的手機。",
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "iOS, Android",
+  "browserRequirements": "需要 Safari（iPhone）或 Chrome（Android）",
+  "inLanguage": "zh-Hant-TW",
+  "image": "https://andywu1101.github.io/scanner/og-image.png",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "TWD" },
+  "author": { "@type": "Person", "name": "伍祐恆", "alternateName": "Heng-Heng Wu" }
+}
+</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
