@@ -4252,7 +4252,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.1.3';
+const APP_VER = '4.1.4';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字

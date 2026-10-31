@@ -175,7 +175,8 @@ svg{display:block}
 /* 單頁檢視 */
 #page{background:#E9DFD3}
 #viewStage{position:relative;flex:1;overflow:hidden;touch-action:none}
-#viewImg{position:absolute;left:0;top:0;transform-origin:0 0;box-shadow:0 4px 22px rgba(58,40,30,.25);background:#fff;max-width:none;max-height:none}
+#viewImg{position:absolute;left:0;top:0;transform-origin:0 0;box-shadow:0 4px 22px rgba(58,40,30,.25);background:#fff;max-width:none;max-height:none;
+  pointer-events:none;-webkit-user-drag:none;user-select:none;-webkit-user-select:none} /* 4.1.4：長按不會被 iPhone 拿起來拖曳（手勢都由 #viewStage 處理） */
 .navarrow{position:absolute;top:50%;transform:translateY(-50%);width:40px;height:56px;display:grid;place-items:center;color:var(--cocoa);background:rgba(255,252,248,.75);border-radius:12px;z-index:2}
 .navarrow svg{width:22px;height:22px}
 #prevBtn{left:6px}#nextBtn{right:6px}
@@ -757,7 +758,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
     <button class="ibtn" id="pageDel" aria-label="刪除此頁"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg></button>
   </header>
   <div id="viewStage">
-    <img id="viewImg" alt="">
+    <img id="viewImg" alt="" draggable="false">
     <button class="navarrow" id="prevBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
     <button class="navarrow" id="nextBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
     <div id="viewBusy"><div class="spin"></div></div>
