@@ -226,9 +226,17 @@ const processing = { has: (id) => (procCount.get(id) || 0) > 0 };
 let queueGate = null;
 function pauseQueue() { if (!queueGate) { let r; queueGate = new Promise((x) => { r = x; }); queueGate.release = r; } }
 function resumeQueue() { if (queueGate) { const g = queueGate; queueGate = null; g.release(); } }
+// 4.2.1：一次 AI 框選多頁時（按「完成」後、文件頁「AI 框選」）先暫停頁面處理，框完再處理。
+// iPhone 一邊框選、一邊把整張照片解開拉正，記憶體疊加會閃退（作者實測 5 頁必閃退；等處理完再框就不會）。和拍攝用的 queueGate 分開
+let batchGate = null, procNow = null;
+async function holdQueue() {
+  if (!batchGate) { let r; batchGate = new Promise((x) => { r = x; }); batchGate.release = r; }
+  if (procNow) await procNow.catch(() => {}); // 正在處理的那一頁先做完
+}
+function releaseQueue() { if (batchGate) { const g = batchGate; batchGate = null; g.release(); } }
 function enqueue(pageId) {
   procCount.set(pageId, (procCount.get(pageId) || 0) + 1);
-  queue = queue.then(() => queueGate).then(() => processPageNow(pageId)).catch((e) => { console.error(e); toast('處理失敗：' + e.message); })
+  queue = queue.then(() => queueGate).then(() => batchGate).then(() => (procNow = processPageNow(pageId))).catch((e) => { console.error(e); toast('處理失敗：' + e.message); })
     .finally(() => { procCount.set(pageId, procCount.get(pageId) - 1); onPageUpdated(pageId); });
   return queue;
 }
@@ -783,6 +791,9 @@ $('#fileGallery').addEventListener('change', async (e) => {
   if (!docId) docId = (await createDoc()).id;
   const useAI = await aiAutoOn();
   let rejected = 0, aiErr = null;
+  // 4.2.2：開著自動 AI 框選時，和 4.2.1 的批次框選一樣先暫停頁面處理、全部框完再處理（相簿照片解析度高，一邊框一邊處理容易閃退）
+  if (useAI) { busy(`AI 框選中 1 / ${files.length}`); await holdQueue(); aiBatchMark(true); }
+  try {
   for (let i = 0; i < files.length; i++) {
     busy(`${useAI ? 'AI 框選中' : '匯入中'} ${i + 1} / ${files.length}`);
     try {
@@ -795,6 +806,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
       await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
   }
+  } finally { if (useAI) { aiBatchMark(false); releaseQueue(); aiReleaseSoon(); } }
   unbusy();
   openDoc(docId, current !== 'doc');
   if (aiErr) toast('AI 框選失敗：' + aiErr);
@@ -1737,6 +1749,8 @@ function aiBg(pageId, blob, c0, n) {
 // Android：按「完成」後把這次拍的頁一次用 AI 框好
 async function aiRunLater(ids) {
   let done = 0, firstErr = null;
+  busy(`AI 框選中 1 / ${ids.length}`);
+  await holdQueue(); aiBatchMark(true);
   try {
     for (let i = 0; i < ids.length; i++) {
       busy(`AI 框選中 ${i + 1} / ${ids.length}`);
@@ -1745,7 +1759,7 @@ async function aiRunLater(ids) {
       if (r && r.corners) done++;
       else if (r && r.fail === 'error' && !firstErr) firstErr = r.msg;
     }
-  } finally { unbusy(); }
+  } finally { aiBatchMark(false); unbusy(); releaseQueue(); aiReleaseSoon(); }
   if (current === 'doc') renderDoc();
   toast(firstErr ? `AI 框選失敗：${firstErr}` : `AI 框選完成：${done} / ${ids.length} 頁${done < ids.length ? '（其餘判斷不適合，保留原框）' : ''}`);
 }
@@ -1771,7 +1785,7 @@ function finishLive() {
     history.replaceState({ s: 'doc', doc: docId }, '');
     renderDoc(); show('doc');
   } else history.back();
-  if (later.length) setTimeout(() => aiRunLater(later), 300);
+  if (later.length) setTimeout(() => aiRunLater(later), 1000); // 4.2.1：等相機釋放（原 0.3 秒）
 }
 document.addEventListener('visibilitychange', () => {
   if (document.hidden && current === 'live') finishLive();
@@ -3878,7 +3892,32 @@ function aiReset() {
   for (const p of aiPending.values()) p.rej(new Error('AI 重新載入'));
   aiPending.clear(); aiWorker = null; aiInitP = null; aiEngineNow = null;
 }
+/* 4.2.1：用完就釋放 AI 引擎（整個 ai-worker 結束掉，GPU 與 WebAssembly 的記憶體都還給系統；下次用再載入，約 0.5 秒）。
+   一次框選做完、AI 精修做完後排一次；閒置 3 秒、沒有工作、沒有批次與精修進行中才真的釋放 */
+let aiLastUse = 0, aiRelT = 0, aiBatchOn = false;
+function aiReleaseSoon() {
+  clearTimeout(aiRelT);
+  aiRelT = setTimeout(() => {
+    if (!aiWorker) return;
+    if (aiPending.size || aiBatchOn || srProg.size || performance.now() - aiLastUse < 2500) { aiReleaseSoon(); return; }
+    aiReset();
+  }, 3000);
+}
+// 4.2.1 閃退保護：批次框選開始時記下、結束清掉；下次打開還在＝上次框到一半閃退 → AI 框選改用 CPU（較省記憶體）並提示
+const AI_BATCH_KEY = 'cocoscan-aibatch';
+function aiBatchMark(on) {
+  aiBatchOn = on;
+  try { if (on) localStorage.setItem(AI_BATCH_KEY, String(Date.now())); else localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
+}
+function aiCrashCheck() {
+  let was = null; try { was = localStorage.getItem(AI_BATCH_KEY); localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
+  if (!was) return;
+  settings.aiEP = 'wasm'; settings.aiSafeCPU = true; saveSettings();
+  setTimeout(() => toast('上次 AI 框選中斷，已改用較省記憶體的方式'), 1500);
+}
+aiCrashCheck();
 function aiPost(payload, transfer) {
+  aiLastUse = performance.now();
   return new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
 }
 function aiInit() {
@@ -3900,7 +3939,7 @@ function aiInit() {
 async function aiBench() {
   try {
     const r = await aiPost({ type: 'bench' });
-    settings.aiEP = r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm';
+    settings.aiEP = !settings.aiSafeCPU && r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm'; // 4.2.1：閃退保護改過 CPU 就不再改回 GPU
     settings.aiBenchV = AI_NEW_VER; saveSettings();
     console.info('AI bench', r, settings.aiEP);
     await aiPost({ type: 'setEP', ep: settings.aiEP });
@@ -4046,6 +4085,8 @@ async function aiFrameDoc() {
   if (mine) overwrite = confirm(`有 ${mine} 頁自己調整過範圍。\n要一起用 AI 重新框選嗎？\n\n確定：全部重新框選\n取消：保留那幾頁`);
   const before = [], tag = 'ai:' + Date.now();
   let changed = 0, kept = 0;
+  busy(`AI 框選中 1 / ${pages.length}`);
+  await holdQueue(); aiBatchMark(true);
   try {
     for (let i = 0; i < pages.length; i++) {
       busy(`AI 框選中 ${i + 1} / ${pages.length}`);
@@ -4063,7 +4104,7 @@ async function aiFrameDoc() {
         changed++;
       } else kept++;
     }
-  } finally { unbusy(); }
+  } finally { aiBatchMark(false); unbusy(); releaseQueue(); aiReleaseSoon(); }
   if (current === 'doc' && state.docId === docId) renderDoc();
   undoBar(`AI 框選完成：${changed} 頁已重新框選${kept ? `，${kept} 頁維持原框` : ''}`, changed ? async () => {
     for (const b of before) {
@@ -4211,6 +4252,7 @@ async function srEnsurePage(page) {
     let r = null;
     try { await srEnsureModel(); r = await srRun(page); }
     catch (e) { console.warn('AI 精修', e); toast('AI 精修失敗：' + (e && e.message ? e.message : e)); }
+    finally { aiReleaseSoon(); } // 4.2.1：精修完釋放 AI 引擎（4.1 起精修的 GPU 記憶體一直沒還）
     if (!r || !r.blob) return null;
     const latest = await DB.get('pages', page.id);
     if (!latest) return null;
@@ -4251,7 +4293,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.2';
+const APP_VER = '4.2.2';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字

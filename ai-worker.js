@@ -113,9 +113,9 @@ async function srBench(n) {
 }
 
 /* 4.2：TEED 邊緣模型（MIT，0.25 MB）。app.js 送來照片縮小後的 RGBA（長邊 640、寬高為 8 的倍數），
-   回傳每個像素的邊緣強度（0～255）。worker.js 的 teedFuse 用它跟 AI 遮罩互助框選。CPU／GPU 跟框選用同一個設定（ep） */
+   回傳每個像素的邊緣強度（0～255）。worker.js 的 teedFuse 用它跟 AI 遮罩互助框選。4.2.1 起一律用 CPU */
 const TEED_MODEL = new URL('lib/ai/teed.onnx', self.location.href).href;
-let teedSess = null, teedSessEP = null, teedNoGpu = false; // GPU 出錯過就一直用 CPU
+let teedSess = null, teedSessEP = null, teedNoGpu = true; // 4.2.1：一律用 CPU（iPhone 只多約 0.1 秒，少占 GPU 記憶體；輸入大小隨照片比例變，GPU 每種大小都要另開記憶體）
 async function teedGet() {
   const want = teedNoGpu ? 'wasm' : ep;
   if (teedSess && teedSessEP === want) return teedSess;
