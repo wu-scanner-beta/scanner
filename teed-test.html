@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TEED 測速</title>
+<style>
+:root{--bg:#1C130E;--cream:#F6EFE6;--cocoa:#5a3b28;--gold:#F2C48D;--txt:#fff}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--txt);font-family:-apple-system,"PingFang TC","Noto Sans TC",sans-serif;-webkit-text-size-adjust:100%}
+.wrap{max-width:720px;margin:0 auto;padding:16px 16px 40px}
+h1{font-size:19px;margin:6px 0 4px}
+.note{font-size:13px;opacity:.75;line-height:1.6}
+.card{background:rgba(255,255,255,.07);border-radius:14px;padding:12px 14px;margin:12px 0}
+button{font:inherit;font-size:15px;border:0;border-radius:20px;padding:10px 20px;background:var(--cream);color:var(--cocoa);font-weight:700}
+button:disabled{opacity:.4}
+#log{font-size:13px;line-height:1.7;white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;opacity:.9}
+.bar{height:8px;background:rgba(255,255,255,.12);border-radius:4px;overflow:hidden;margin-top:8px}
+.bar i{display:block;height:100%;width:0;background:var(--gold);transition:width .2s}
+table{width:100%;border-collapse:collapse;font-size:14px;margin-top:6px}
+th,td{padding:6px 4px;border-bottom:1px solid rgba(255,255,255,.12);text-align:right}
+th:first-child,td:first-child{text-align:left}
+th{color:var(--gold);font-weight:700}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:8px}
+.grid div{font-size:12px;opacity:.85}
+.grid canvas{width:100%;display:block;border-radius:6px;background:#333}
+.lg span{display:inline-block;width:14px;height:4px;margin:0 4px 3px 10px;vertical-align:middle}
+</style>
+</head>
+<body><div class="wrap">
+<h1>TEED 測速（不影響 App）</h1>
+<div class="note">用 6 張樣張量這支手機跑 AI 要花多久：<br>
+・原本的 AI 框選模型（u2netp，320×320）<br>
+・TEED 邊緣模型：正常大小（長邊 640）與縮小（長邊 320）<br>
+CPU、GPU 各跑一輪，約 1～3 分鐘。測試時請保持畫面亮著、不要切換 App。</div>
+<div class="card">
+  <button id="go">開始測試</button>
+  <div class="bar"><i id="bar"></i></div>
+  <div id="log"></div>
+</div>
+<div class="card" id="resCard" hidden>
+  <b>結果（毫秒，6 張的中位數；括號內是最慢的一張）</b>
+  <div class="note" id="dev"></div>
+  <table id="tbl"></table>
+  <div class="note" id="sum" style="margin-top:8px"></div>
+</div>
+<div class="card" id="visCard" hidden>
+  <b>框選結果</b>
+  <div class="note lg"><span style="background:#ff2bd6"></span>只用 AI<span style="background:#18d0ff"></span>AI＋TEED（640）<span style="background:#ffd400"></span>AI＋TEED（320）</div>
+  <div class="grid" id="grid" style="margin-top:8px"></div>
+</div>
+</div>
+<script src="lib/ai/ort.webgpu.min.js"></script>
+<script>
+ort.env.wasm.wasmPaths = new URL('lib/ai/', location.href).href;
+ort.env.wasm.numThreads = 1;
+const $ = (s) => document.querySelector(s);
+const SAMPLES = [1, 2, 3, 4, 5, 6].map((i) => 'tt/s' + i + '.jpg');
+const log = (s) => { $('#log').textContent += s + '\n'; };
+const med = (a) => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[b.length >> 1] : null; };
+const fmt = (x) => (x == null ? '—' : Math.round(x));
+
+// 框選用的 worker（測試版：多了 TEED 互助）
+const W = new Worker('teed-worker.js'); let wReady = false, seq = 0; const P = new Map();
+W.onmessage = (e) => { const m = e.data; if (m.type === 'ready') { wReady = true; return; } const p = P.get(m.id); if (!p) return; P.delete(m.id); m.ok ? p.res(m.result) : p.rej(new Error(m.error)); };
+const wcall = (type, pl, tr) => new Promise((res, rej) => { const id = ++seq; P.set(id, { res, rej }); W.postMessage(Object.assign({ id, type }, pl), tr || []); });
+
+const load = (s) => new Promise((r, j) => { const i = new Image(); i.onload = () => r(i); i.onerror = () => j(new Error('讀不到 ' + s)); i.src = s; });
+function pix(img, w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d', { willReadFrequently: true }); x.imageSmoothingQuality = 'high'; x.drawImage(img, 0, 0, w, h); return x.getImageData(0, 0, w, h); }
+function frame(img, M) { const s = M / Math.max(img.width, img.height); return pix(img, Math.round(img.width * s), Math.round(img.height * s)); }
+// u2netp 前處理（和 ai-worker.js 一樣）
+function u2In(img) {
+  const d = pix(img, 320, 320).data, N = 320 * 320, MEAN = [0.485, 0.456, 0.406], STD = [0.229, 0.224, 0.225];
+  let mx = 1; for (let i = 0; i < d.length; i += 4) mx = Math.max(mx, d[i], d[i + 1], d[i + 2]);
+  const f = new Float32Array(3 * N); for (let i = 0; i < N; i++) for (let c = 0; c < 3; c++) f[c * N + i] = (d[i * 4 + c] / mx - MEAN[c]) / STD[c];
+  return f;
+}
+function u2Mask(out) { const N = 320 * 320; let lo = Infinity, hi = -Infinity; for (let i = 0; i < N; i++) { lo = Math.min(lo, out[i]); hi = Math.max(hi, out[i]); } const m = new Uint8Array(N), k = hi > lo ? 255 / (hi - lo) : 0; for (let i = 0; i < N; i++) m[i] = Math.round((out[i] - lo) * k); return m; }
+// TEED 前處理：BGR 減平均，寬高取 8 的倍數
+function teedIn(img, side) {
+  const s = side / Math.max(img.width, img.height), w = Math.floor((img.width * s) / 8) * 8, h = Math.floor((img.height * s) / 8) * 8;
+  const d = pix(img, w, h).data, N = w * h, f = new Float32Array(3 * N);
+  for (let i = 0; i < N; i++) { f[i] = d[i * 4 + 2] - 103.939; f[N + i] = d[i * 4 + 1] - 116.779; f[2 * N + i] = d[i * 4] - 123.68; }
+  return { f, w, h };
+}
+async function runS(s, f, dims) {
+  const o = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', f, dims) });
+  const t = o[s.outputNames[0]]; return t.getData ? await t.getData() : t.data;
+}
+async function timed(fn) { const t = performance.now(); const r = await fn(); return [performance.now() - t, r]; }
+
+$('#go').onclick = async () => {
+  $('#go').disabled = true; $('#log').textContent = '';
+  try {
+    let hasGpu = false; try { hasGpu = !!(navigator.gpu && (await navigator.gpu.requestAdapter())); } catch (_) {}
+    $('#dev').textContent = navigator.userAgent.replace(/^Mozilla\/5\.0 /, '') + '｜GPU（WebGPU）：' + (hasGpu ? '有' : '沒有');
+    log('載入樣張…');
+    const imgs = []; for (const s of SAMPLES) imgs.push(await load(s));
+    const eps = hasGpu ? ['wasm', 'webgpu'] : ['wasm'];
+    const total = eps.length * imgs.length * 3 + imgs.length; let done = 0; const step = () => { done++; $('#bar').style.width = (done / total) * 100 + '%'; };
+    const R = {}; let masks = null, maps640 = null, maps320 = null;
+    for (const ep of eps) {
+      const name = ep === 'wasm' ? 'CPU' : 'GPU';
+      log(name + '：載入模型…');
+      const r = R[ep] = { first: {}, u2: [], t640: [], t320: [] };
+      let su, st;
+      try {
+        su = await ort.InferenceSession.create('lib/ai/u2netp.onnx', { executionProviders: [ep], graphOptimizationLevel: 'all' });
+        st = await ort.InferenceSession.create('lib/ai/teed.onnx', { executionProviders: [ep], graphOptimizationLevel: 'all' });
+      } catch (e) { log(name + ' 無法使用：' + e.message); r.err = e.message; continue; }
+      // 第一次（含準備時間）
+      const a = teedIn(imgs[0], 640), b = teedIn(imgs[0], 320);
+      r.first.u2 = (await timed(() => runS(su, u2In(imgs[0]), [1, 3, 320, 320])))[0];
+      r.first.t640 = (await timed(() => runS(st, a.f, [1, 3, a.h, a.w])))[0];
+      r.first.t320 = (await timed(() => runS(st, b.f, [1, 3, b.h, b.w])))[0];
+      const ms = [], m6 = [], m3 = [];
+      for (let i = 0; i < imgs.length; i++) {
+        log(name + '：第 ' + (i + 1) + ' 張');
+        const fu = u2In(imgs[i]); let [t, o] = await timed(() => runS(su, fu, [1, 3, 320, 320])); r.u2.push(t); ms.push(u2Mask(o)); step();
+        const x6 = teedIn(imgs[i], 640); [t, o] = await timed(() => runS(st, x6.f, [1, 3, x6.h, x6.w])); r.t640.push(t);
+        m6.push({ u: Uint8Array.from(o, (v) => Math.round(v * 255)), w: x6.w, h: x6.h }); step();
+        const x3 = teedIn(imgs[i], 320); [t, o] = await timed(() => runS(st, x3.f, [1, 3, x3.h, x3.w])); r.t320.push(t);
+        m3.push({ u: Uint8Array.from(o, (v) => Math.round(v * 255)), w: x3.w, h: x3.h }); step();
+        await new Promise((z) => setTimeout(z, 30));
+      }
+      if (!masks) { masks = ms; maps640 = m6; maps320 = m3; }
+      try { await su.release(); await st.release(); } catch (_) {}
+    }
+    // 框選比較
+    log('框選比較…');
+    while (!wReady) await new Promise((z) => setTimeout(z, 100));
+    const fz = [], vis = [];
+    for (let i = 0; i < imgs.length; i++) {
+      const call = async (tm) => { const f = frame(imgs[i], 900), mk = masks[i].slice(); const pl = { buffer: f.data.buffer, width: f.width, height: f.height, mask: mk.buffer }; const tr = [f.data.buffer, mk.buffer]; if (tm) { const u = tm.u.slice(); pl.teed = { buffer: u.buffer, width: tm.w, height: tm.h }; tr.push(u.buffer); } return wcall('maskQuad', pl, tr); };
+      const a = await call(null), b = await call(maps640[i]), c = await call(maps320[i]);
+      if (b.fuse && b.fuse.ms != null) fz.push(b.fuse.ms);
+      vis.push([imgs[i], a, b, c]); step();
+    }
+    // 結果表
+    let h = '<tr><th></th><th>AI 框選<br>u2netp</th><th>TEED<br>640</th><th>TEED<br>320</th></tr>';
+    for (const ep of eps) {
+      const r = R[ep], name = ep === 'wasm' ? 'CPU' : 'GPU';
+      if (r.err) { h += `<tr><td>${name}</td><td colspan=3>無法使用</td></tr>`; continue; }
+      h += `<tr><td>${name}</td><td>${fmt(med(r.u2))} (${fmt(Math.max(...r.u2))})</td><td>${fmt(med(r.t640))} (${fmt(Math.max(...r.t640))})</td><td>${fmt(med(r.t320))} (${fmt(Math.max(...r.t320))})</td></tr>`;
+      h += `<tr><td style="opacity:.7">${name} 第一次</td><td>${fmt(r.first.u2)}</td><td>${fmt(r.first.t640)}</td><td>${fmt(r.first.t320)}</td></tr>`;
+    }
+    $('#tbl').innerHTML = h;
+    $('#sum').textContent = '互助計算（投票＋找彎度）：中位數 ' + fmt(med(fz)) + ' 毫秒';
+    $('#resCard').hidden = false;
+    // 畫框
+    const path = (x, r, W, H) => {
+      if (!r || !r.corners) return;
+      const cr = (p0, p1, p2, p3, t) => { const t2 = t * t, t3 = t2 * t; return [0, 1].map((k) => 0.5 * (2 * p1[k] + (-p0[k] + p2[k]) * t + (2 * p0[k] - 5 * p1[k] + 4 * p2[k] - p3[k]) * t2 + (-p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]) * t3)); };
+      x.beginPath(); let st = true;
+      for (let e = 0; e < 4; e++) {
+        const A = r.corners[e], B = r.corners[(e + 1) % 4]; let pts = [A, B];
+        if (r.curve) { const q = [A, ...r.curve[e], B], m = q.length, E = [[2 * A[0] - q[1][0], 2 * A[1] - q[1][1]], ...q, [2 * B[0] - q[m - 2][0], 2 * B[1] - q[m - 2][1]]]; pts = []; for (let s = 1; s < m; s++) for (let k = 0; k < 8; k++) pts.push(cr(E[s - 1], E[s], E[s + 1], E[s + 2], k / 8)); pts.push(B); }
+        for (const p of pts) { st ? x.moveTo(p[0] * W, p[1] * H) : x.lineTo(p[0] * W, p[1] * H); st = false; }
+      }
+      x.closePath(); x.stroke();
+    };
+    const tag = (r) => (!r || !r.corners ? '沒框' : r.fuse && r.fuse.src ? r.fuse.src.replace(/a/g, 'A').replace(/t/g, 'T') : 'A');
+    $('#grid').innerHTML = '';
+    vis.forEach(([img, a, b, c], i) => {
+      const cv = document.createElement('canvas'), s = 600 / Math.max(img.width, img.height); cv.width = Math.round(img.width * s); cv.height = Math.round(img.height * s);
+      const x = cv.getContext('2d'); x.drawImage(img, 0, 0, cv.width, cv.height); x.lineJoin = 'round';
+      x.lineWidth = 9; x.strokeStyle = '#ff2bd6'; path(x, a, cv.width, cv.height);
+      x.lineWidth = 5; x.strokeStyle = '#18d0ff'; path(x, b, cv.width, cv.height);
+      x.lineWidth = 2; x.strokeStyle = '#ffd400'; path(x, c, cv.width, cv.height);
+      const d = document.createElement('div'); d.appendChild(cv); d.appendChild(document.createTextNode('第 ' + (i + 1) + ' 張｜AI：' + (a && a.corners ? '有框' : '沒框') + '｜640：' + tag(b) + '｜320：' + tag(c))); $('#grid').appendChild(d);
+    });
+    $('#visCard').hidden = false;
+    log('完成，請截圖「結果」和「框選結果」給我。');
+  } catch (e) { log('錯誤：' + (e && e.message ? e.message : e)); }
+  $('#go').disabled = false;
+};
+</script>
+</body>
+</html>
