@@ -736,55 +736,7 @@ async function finishBurst() {
 }
 $('#burstDone').onclick = finishBurst;
 
-// 3.1.7：自動轉正。iPhone 系統相機平拿往下拍時常把照片存成躺的（相機自己判斷錯方向，網頁管不到）。
-// 拉正後看線條方向：五線譜、歌詞、文字行放正時是橫的，躺著時變直的。用「每一條窄帶裡的行／列輪廓起伏」比較橫、直兩個方向
-// （書頁彎曲時長線會斷，所以分 16 條窄帶各自算）。分數 = 橫 / (橫 + 直)；樣張 57 張直式＋4 張橫式：放正 ≥ 0.54、躺著 ≤ 0.46。
-// 低於 0.45 才轉（明顯躺著），轉的方向固定順時針 90 度（作者實測大多是這個方向；轉錯可在框選畫面再按「向右轉」）。
-// 看的是線條不是長寬，所以橫式樂譜不會被轉。任何錯誤都當作不轉。
-function lineScore(g, W, H) {
-  // 自適應二值化（25×25 區域平均減 5 以下算墨跡，等同 OpenCV ADAPTIVE_THRESH_MEAN_C）
-  const I = new Float64Array((W + 1) * (H + 1));
-  for (let y = 0; y < H; y++) { let s = 0; for (let x = 0; x < W; x++) { s += g[y * W + x]; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + s; } }
-  const b = new Uint8Array(W * H), R = 12;
-  for (let y = 0; y < H; y++) {
-    const y0 = Math.max(0, y - R), y1 = Math.min(H, y + R + 1);
-    for (let x = 0; x < W; x++) {
-      const x0 = Math.max(0, x - R), x1 = Math.min(W, x + R + 1);
-      const m = (I[y1 * (W + 1) + x1] - I[y0 * (W + 1) + x1] - I[y1 * (W + 1) + x0] + I[y0 * (W + 1) + x0]) / ((y1 - y0) * (x1 - x0));
-      b[y * W + x] = g[y * W + x] <= m - 5 ? 1 : 0;
-    }
-  }
-  const K = 16;
-  const prof = (rows, cols, at) => { // 每條窄帶：沿 rows 方向的輪廓，相鄰差的平均
-    const st = Math.floor(cols / K); let v = 0;
-    for (let i = 0; i < K; i++) {
-      let prev = -1, acc = 0;
-      for (let r = 0; r < rows; r++) { let s = 0; for (let c = i * st; c < (i + 1) * st; c++) s += at(r, c); s /= st; if (prev >= 0) acc += Math.abs(s - prev); prev = s; }
-      v += acc / (rows - 1);
-    }
-    return v;
-  };
-  const h = prof(H, W, (r, c) => b[r * W + c]), v = prof(W, H, (r, c) => b[c * W + r]);
-  return h / (h + v + 1e-9);
-}
-async function autoRot(blob, corners, curve) {
-  try {
-    await whenReady();
-    const { img, url } = await loadImg(blob);
-    const f = smallFrame(img, 1600); URL.revokeObjectURL(url);
-    const r = await wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners, curve: curve || null, upscale: 'off', rotation: 0, mode: 'original', params: fillAdj('original') }, [f.data.buffer]);
-    const s = Math.min(1, 900 / Math.max(r.width, r.height)), W = Math.max(32, Math.round(r.width * s)), H = Math.max(32, Math.round(r.height * s));
-    const src = canvasOf(r.width, r.height); src.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.buffer), r.width, r.height), 0, 0);
-    const c = canvasOf(W, H), x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(src, 0, 0, W, H); src.width = src.height = 0;
-    const d = x.getImageData(0, 0, W, H).data, g = new Float32Array(W * H);
-    for (let i = 0; i < W * H; i++) g[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
-    c.width = c.height = 0;
-    const sc = lineScore(g, W, H);
-    autoRot.last = sc;
-    return sc < 0.45 ? 90 : 0;
-  } catch (e) { console.warn('autoRot', e); return 0; }
-}
-
+// 4.1.6：3.1.7 的自動轉正（看線條方向，躺著就順時針轉 90 度）拿掉：作者實測仍有誤轉，框選畫面已有「向右轉」
 // 3.0.1：高畫質拍照、相簿匯入也跟著「自動 AI 框選」開關（開著而且 AI 已下載才用）。
 // 回傳 { corners, curve }；AI 判斷不適合或失敗回傳 { fail, msg }（呼叫的地方保留一般偵測的框）
 async function aiAutoOn() { return !!settings.autoAI && (await aiCached()); }
@@ -810,16 +762,15 @@ $('#fileCamera').addEventListener('change', async (e) => {
     if (r.corners) { corners = r.corners; curve = r.curve; }
     else toast(r.fail === 'reject' ? 'AI 判斷不適合，保留原框' : 'AI 框選失敗：' + (r.msg || '未知原因'));
   }
-  const rot0 = await autoRot(blob, corners, curve); // 3.1.7：iPhone 平拿拍照常把照片存成躺的，躺著就自動順時針轉正
   unbusy();
   if (settings.confirmCrop) {
     openCrop({
-      blob, corners, curve, rotation: rot0, retake: true, burst: true,
+      blob, corners, curve, retake: true, burst: true,
       onConfirm: async (c, cv, edited, rot) => { sfxPrime(); const pg = await burstAdd(blob, c, cv, rot); if (edited) { pg.cropUser = true; await DB.put('pages', pg); } toBurst(); },
       onRetake: () => openCamera(),
     });
   } else {
-    await burstAdd(blob, corners, curve, rot0);
+    await burstAdd(blob, corners, curve);
     toBurst();
     toast(`已加入第 ${burst.count} 張`);
   }
@@ -841,7 +792,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
         const r = await aiCorners(blob);
         if (r.corners) { c = r.corners; cv = r.curve; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
       }
-      await addPage(docId, blob, c, cv, false, await autoRot(blob, c, cv)); // 3.1.7：躺著的自動轉正
+      await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
   }
   unbusy();
@@ -4252,7 +4203,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.1.5';
+const APP_VER = '4.1.6';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4283,7 +4234,6 @@ const CHANGELOG = [
     { t: '即時掃描、高畫質拍照加入框選動畫與音效', since: '4.0' },
     { t: '最佳化立即裁切：編輯時暫停相機，減少耗電與發熱', since: '4.0' },
     { t: '最佳化高畫質拍照流程體驗', since: '4.0' },
-    { t: '新增樂譜拍攝自動轉向功能，將自動偵測樂譜的方向', since: '4.0' },
     { t: '新增 ✨ AI 精修：讓樂譜線條與文字更清晰', since: '4.1.2' },
   ] },
 ];
