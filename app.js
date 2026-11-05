@@ -829,7 +829,9 @@ async function startLive(docId) {
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
     aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false, camOff: false,
     seenT: performance.now(), idleT0: performance.now(), tipOn: false, // 4.1.7
+    teedOK: false, teedBusy: false, teedNext: 0, teedErr: 0, capSrc: null, tT0: null, tCapped: false, tCapSig: null, // 4.3
   });
+  aiHas([TEED_FILE]).then((ok) => { if (live.running) live.teedOK = ok; }); // 4.3：有 TEED 才有即時後援
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
   pauseQueue(); // 掃描期間暫停高解析度處理，讓抓邊保持流暢
   resetLock();
@@ -979,6 +981,7 @@ function camResume() {
 }
 function stopLive() {
   live.running = false; live.camOff = false; live.tipOn = false; tipSync();
+  if (live.teedOK) aiReleaseSoon(); // 4.3：即時 TEED 用過，離開後釋放 AI 引擎
   clearTimeout(camTipT); $('#camTip').classList.remove('show');
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
   live.stream = null;
@@ -1009,7 +1012,7 @@ function medianQuad(list) {
   return [0, 1, 2, 3].map((i) => [med(list.map((q) => q[i][0])), med(list.map((q) => q[i][1]))]);
 }
 function resetLock() {
-  Object.assign(live, { cand: [], acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
+  Object.assign(live, { cand: [], tCand: [], lockSrc: null, acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
   live.lastQuad = null;
 }
 // 清晰度（梯度能量），用來從穩定期間挑最清楚的一格
@@ -1090,12 +1093,61 @@ function grabInto(c, v) {
 }
 function grabFull(v) { return grabInto(fullCanvases[0], v); }
 
+/* ---------- 4.3 即時掃描的 TEED 後援 ----------
+   白色／淺色背景時原本的偵測鎖不到框：鎖不到 2 秒後，相機畫面縮成長邊 640 交給 TEED（ai-worker，CPU），
+   worker.js 的 teedRegionQuad 找出「中間沒被線切斷的最大區塊」當框，交給同一套鎖定、倒數、拍照流程（onDetect 的 src 'teed'）。
+   - 跑完一次休息至少和這次一樣久（iPhone 17 約每 0.4 秒、Y31 約每 1.6 秒一次），原本的偵測照常一起找，誰先鎖到聽誰的
+   - TEED 鎖到後，這一頁由 TEED 負責到拍完、換頁為止（teedOwns：原本的偵測不參與、也不跑）
+   - 連續跑 20 秒沒結果就先停（控制發熱），畫面明顯改變（frameSig 差 > 18）才再開始；只有下載過 AI 資料（有 TEED）的手機才有 */
+const TEED_AFTER = 2000, TEED_CAP = 20000;
+function teedOwns() { return !!live.teedOK && (live.armed ? live.lockSrc === 'teed' : live.capSrc === 'teed'); }
+function teedWanted(now) {
+  if (!live.teedOK || !live.running || !settings.autoShutter || live.paused || live.capturing) return false;
+  if (live.armed) return live.lockQ ? live.lockSrc === 'teed' : now - Math.max(live.idleT0 || now, live.seenT || 0) > TEED_AFTER;
+  return live.capSrc === 'teed';
+}
+function teedRearm() { live.capSrc = null; live.tT0 = null; live.tCapped = false; live.tCand = []; }
+function teedTick(v) {
+  if (!live.teedOK || live.teedBusy) return;
+  const now = performance.now();
+  if (live.tCapped) { // 停下來了：畫面明顯改變才重新開始
+    if (now < (live.teedNext || 0)) return;
+    live.teedNext = now + 500;
+    if (live.tCapSig && sigDiff(frameSig(v), live.tCapSig) > 18) { live.tCapped = false; live.tT0 = null; }
+    return;
+  }
+  if (!teedWanted(now)) { if (!teedOwns()) live.tT0 = null; return; }
+  if (live.tT0 == null) live.tT0 = now;
+  if (now - live.tT0 > TEED_CAP) { live.tCapped = true; live.tCapSig = frameSig(v); live.tCand = []; if (live.armed && live.lockSrc === 'teed') { resetLock(); setRing(0); } return; }
+  if (now < (live.teedNext || 0)) return;
+  live.teedBusy = true;
+  teedLiveRun(v).then(() => { live.teedErr = 0; }).catch((e) => { console.warn('TEED 即時', e); if (++live.teedErr >= 3) live.teedOK = false; })
+    .finally(() => { const dt = performance.now() - now; live.teedBusy = false; live.teedNext = performance.now() + Math.min(1200, Math.max(250, dt)); }); // 休息和這次一樣久（最少 0.25、最多 1.2 秒；第一次含載入引擎，比較慢）
+}
+async function teedLiveRun(v) {
+  const pre = live.armed && live.lockQ && live.lockSrc === 'teed' && live.progress > 0 && !live.ic;
+  let full = null;
+  if (pre) { const spare = live.best && live.best.canvas === fullCanvases[0] ? fullCanvases[1] : fullCanvases[0]; full = grabInto(spare, v); }
+  const sig = frameSig(v);
+  const [w, h] = sourceSize(v), s = 640 / Math.max(w, h);
+  const W = Math.max(8, Math.floor((w * s) / 8) * 8), H = Math.max(8, Math.floor((h * s) / 8) * 8);
+  const c = canvasOf(W, H), x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(v, 0, 0, W, H);
+  const d = x.getImageData(0, 0, W, H);
+  const sharp = sharpness(d), gt = grayThumb(d);
+  const buf = await aiCall({ type: 'teed', buffer: d.data.buffer, width: W, height: H }, [d.data.buffer]);
+  if (!teedWanted(performance.now())) return;
+  const r = await wcall('teedQuad', { buffer: buf, width: W, height: H }, [buf]);
+  if (!teedWanted(performance.now())) return; // 這段時間原本的偵測鎖到了、拍下了、或離開了
+  onDetect(r, sig, full, sharp, gt, 'teed');
+}
 async function liveLoop() {
   if (!live.running) return;
   const v = $('#video');
   // 手動模式不找框（1.19）；提示語只顯示 3 秒（1.20，作者覺得一直掛著礙眼）
   if (!settings.autoShutter && !live.paused && !live.capturing) { if (performance.now() < (live.manualHintUntil || 0)) setHint(MANUAL_HINT); else hideHint(); }
-  if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth) {
+  if (workerReady && settings.autoShutter && !live.paused && !live.capturing && v.videoWidth) teedTick(v); // 4.3
+  if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth && !teedOwns()) {
     live.detecting = true;
     try {
       // 進入穩定倒數後，每一格都先存全解析度畫面（與偵測用的是同一瞬間）
@@ -1120,8 +1172,11 @@ async function liveLoop() {
   if (live.running) setTimeout(liveLoop, settings.autoShutter && performance.now() - (live.seenT || 0) > 3000 ? 200 : 20);
 }
 
-function onDetect(r, sig, full, sharp, gt) {
+function onDetect(r, sig, full, sharp, gt, src) {
   if (!live.running || live.capturing) return;
+  src = src || 'det';
+  if (src === 'det' && teedOwns()) return; // 4.3：TEED 鎖定的頁、或 TEED 負責判斷換頁時，原本的偵測不參與
+  const tq = src === 'teed'; // 4.3：TEED 一秒只有 1～2 格，累積的格數門檻較低
   const now = performance.now();
   const ok = r && r.area > 0.1;
   const qs = ok ? quadSig(gt, r.corners) : null;
@@ -1142,14 +1197,14 @@ function onDetect(r, sig, full, sharp, gt) {
     const changed = qs && live.capturedQs && qsDiff(qs, live.capturedQs) > CHANGE_TOL;
     live.chgHits = changed ? (live.chgHits || 0) + 1 : 0;
     if (!ok) live.miss++; else live.miss = 0;
-    if (live.chgHits >= 3 || live.miss >= 3) { live.rearm = live.chgHits >= 3 ? 'changed' : 'miss'; live.armed = true; live.chgHits = 0; resetLock(); live.idleT0 = now; } // 4.2：換頁後重新計時提示
+    const hitN = tq ? 2 : 3;
+    if (live.chgHits >= hitN || live.miss >= hitN) { live.rearm = live.chgHits >= hitN ? 'changed' : 'miss'; live.armed = true; live.chgHits = 0; resetLock(); live.idleT0 = now; teedRearm(); } // 4.2：換頁後重新計時提示
     else { setHint('已拍好，請換下一頁', true); return; }
   }
 
   if (!ok) {
-    live.miss++;
-    live.cand = [];
-    if (live.miss >= 4 && live.lockQ) resetLock();
+    if (tq) { live.tCand = []; if (live.lockQ) { if (++live.miss >= 2) resetLock(); } }
+    else { live.miss++; live.cand = []; if (live.miss >= 4 && live.lockQ) resetLock(); }
     if (!live.lockQ) { setRing(0); setHint(live.tipOn ? waitTip() : live.count ? '放入下一頁' : '將文件放進畫面中'); }
     return;
   }
@@ -1158,12 +1213,14 @@ function onDetect(r, sig, full, sharp, gt) {
 
   if (!live.lockQ) {
     // 尚未鎖定：需要連續 3 格位置一致，才確定是文件
-    if (live.cand.length && maxDisp(q, live.cand[live.cand.length - 1]) > 0.05) live.cand = [];
-    live.cand.push(q);
-    if (live.cand.length < 3) { setHint(live.tipOn ? waitTip() : '尋找文件中…'); return; }
-    live.lockQ = medianQuad(live.cand);
-    live.acc = live.cand.slice();
-    live.cand = [];
+    // 4.3：原本的偵測和 TEED 各自累積（白色背景時原本的偵測一直跳，混在一起 TEED 永遠累積不起來），先鎖到的當這一頁的來源
+    const C = tq ? 'tCand' : 'cand', need = tq ? 2 : 3;
+    if (live[C].length && maxDisp(q, live[C][live[C].length - 1]) > 0.05) live[C] = [];
+    live[C].push(q);
+    if (live[C].length < need) { setHint(live.tipOn ? waitTip() : '尋找文件中…'); return; }
+    live.lockQ = medianQuad(live[C]);
+    live.acc = live[C].slice();
+    live.cand = []; live.tCand = []; live.lockSrc = src; live.tT0 = null;
     live.anchorQ = live.lockQ; live.stableSince = now; live.best = null;
   } else {
     // 已鎖定：離群值忽略，連續 3 次離群才放棄鎖定（例如紙被拿走）
@@ -1321,6 +1378,10 @@ async function capture(sig, full, quadAt, userPress) {
   const steady = !manualMode && !!live.lockQ && !live.edge;
   const needUser = !!userPress && !steady;
   const quad = needUser ? null : quadAt || live.lockQ;
+  // 4.3：TEED 在找或已鎖定時拍下，換頁由 TEED 判斷（原本的偵測在白色背景會誤以為紙拿開，同一頁被重拍）
+  live.capSrc = live.teedOK && (live.lockSrc === 'teed' || live.tT0 != null || live.tCapped) ? 'teed' : 'det';
+  const capQsOk = live.capSrc === 'det' || live.lockSrc === 'teed'; // 不是 TEED 鎖定的框：內容指紋留給拍完後 TEED 的第一格補
+  live.tT0 = null; live.tCapped = false;
   const v = $('#video');
   if (!sig) sig = frameSig(v);
   setRing(0);
@@ -1358,7 +1419,7 @@ async function capture(sig, full, quadAt, userPress) {
       src = full || grabFull(v); // 畫面在這一刻已經固定
       flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); // 這一格已經固定下來，手可以移開了
       setHint('已拍好，請換下一頁', true);
-      live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; // 立刻隱藏框
+      live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = capQsOk ? live.lastQs : null; // 立刻隱藏框
       await deferSave();
       // 1.33：iPhone 省記憶體檔：存檔前縮到上限以內
       const cap = photoCap();
@@ -1376,7 +1437,7 @@ async function capture(sig, full, quadAt, userPress) {
         toast('這張沒拍成功，請再拍一次'); shotFx(''); if (fx) fx.stop();
         live.armed = true; resetLock(); live.capturing = false; endDefer(); return;
       }
-    } else { flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = live.lastQs; await deferSave(); }
+    } else { flash(); sfxPlay('shutter'); if (fxOn) startFx(); else shotFx('ok'); setHint('已拍好，請換下一頁', true); live.armed = false; live.capturedQuad = quad; live.capturedSig = sig; live.capturedQs = capQsOk ? live.lastQs : null; await deferSave(); }
     let corners = quad ? quad.map((p) => p.slice()) : FULL.map((p) => p.slice());
     // 用較高解析度重新精算四個角（只在結果相近時採用，避免抓錯）
     try {
@@ -1598,7 +1659,7 @@ async function removeLivePage(pageId) {
   if (last) { live.lastPageId = last.id; th.querySelector('img').src = blobUrl('live:last', last.original, last.id); refreshLiveThumb(last.id); }
 }
 function liveResume() {
-  live.paused = false; live.idleT0 = live.seenT = performance.now(); // 4.1.7
+  live.paused = false; live.idleT0 = live.seenT = performance.now(); live.tT0 = null; live.tCapped = false; // 4.1.7；4.3
   if (!live.track || live.track.readyState === 'ended') { finishLive(); return; } // 中途被切到背景，相機已經關了
   camResume(); // 3.1.5：相機恢復送畫面
   // 1.20：iPhone 從裁切畫面回來時，相機畫面會用錯誤的大小重畫（縮成約四分之三、四周變黑）。
@@ -1643,7 +1704,7 @@ $('#liveThumb').onclick = () => finishLive();
 $('#autoBtn').onclick = () => {
   settings.autoShutter = !settings.autoShutter; saveSettings();
   updateLiveBtns();
-  live.armed = true; resetLock(); setRing(0); live.tipOn = false; tipSync(); live.idleT0 = live.seenT = performance.now(); // 4.1.7
+  live.armed = true; resetLock(); teedRearm(); setRing(0); live.tipOn = false; tipSync(); live.idleT0 = live.seenT = performance.now(); // 4.1.7；4.3
   if (settings.autoShutter) { setHint('將文件放進畫面中'); liveTip('自動拍攝', '對準文件，穩定後自動拍下'); }
   else { manualHint(); liveTip('手動拍攝', '不自動框選，拍完再自己調整範圍'); }
 };
@@ -4293,7 +4354,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.2.2';
+const APP_VER = '4.3';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4328,6 +4389,7 @@ const CHANGELOG = [
     { t: '最佳化拍攝運作流程，減少拍攝時發熱', since: '4.1.7' },
     { t: '最佳化淺色背景AI框選準確度', since: '4.2' },
     { t: '偵測不到框選範圍時，將提示直接按快門', since: '4.2' },
+    { t: '淺色背景即時掃描時，也能自動找到框選範圍', since: '4.3' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號

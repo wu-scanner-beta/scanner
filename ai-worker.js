@@ -124,6 +124,7 @@ async function teedGet() {
   catch (err) { if (want !== 'webgpu') throw err; teedNoGpu = true; return teedGet(); }
   return teedSess;
 }
+let teedQ = Promise.resolve();
 async function teedRun(buffer, w, h) {
   const d = new Uint8ClampedArray(buffer), n = w * h, f = new Float32Array(3 * n);
   for (let i = 0; i < n; i++) { f[i] = d[i * 4 + 2] - 103.939; f[n + i] = d[i * 4 + 1] - 116.779; f[2 * n + i] = d[i * 4] - 123.68; } // BGR 減平均
@@ -151,7 +152,10 @@ self.onmessage = async (e) => {
       self.postMessage({ id, ok: true, result: r }, [r]); return;
     }
     if (type === 'srRelease') { await srRelease(); self.postMessage({ id, ok: true, result: null }); return; }
-    if (type === 'teed') { const r = await teedRun(e.data.buffer, e.data.width, e.data.height); self.postMessage({ id, ok: true, result: r }, [r]); return; }
+    if (type === 'teed') { // 4.3：即時掃描與框選可能同時送來，排隊一個一個跑（同一個 session 不能同時跑）
+      const job = teedQ.then(() => teedRun(e.data.buffer, e.data.width, e.data.height)); teedQ = job.catch(() => {});
+      const r = await job; self.postMessage({ id, ok: true, result: r }, [r]); return;
+    }
     const s = await getSess();
     if (type === 'warm') { self.postMessage({ id, ok: true, result: { ep: sessEP } }); return; }
     const f = input(e.data.buffer);
