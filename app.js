@@ -1169,7 +1169,7 @@ function freeFullCanvases() { live.best = null; for (const c of fullCanvases) c.
 const TEED_AFTER = 2000, TEED_CAP = 20000;
 function teedOwns() { return !!live.teedOK && (live.armed ? live.lockSrc === 'teed' : live.capSrc === 'teed'); }
 function teedWanted(now) {
-  if (!live.teedOK || !live.running || !settings.autoShutter || live.paused || live.capturing) return false;
+  if (!live.teedOK || !live.running || !settings.autoShutter || live.paused || live.capturing || live.cd) return false;
   if (live.armed) return live.lockQ ? live.lockSrc === 'teed' : now - Math.max(live.idleT0 || now, live.seenT || 0) > TEED_AFTER;
   return live.capSrc === 'teed';
 }
@@ -1208,7 +1208,7 @@ async function teedLiveRun(v) {
   if (!teedWanted(performance.now())) return; // 這段時間原本的偵測鎖到了、拍下了、或離開了
   onDetect(r, sig, full, sharp, gt, 'teed');
 }
-/* ---------- 5.1 倒數拍攝（設定 countdown，預設關；拍攝畫面 AI 按鈕右邊的碼錶按鈕，手動拍攝時隱藏） ----------
+/* ---------- 5.1 倒數拍攝（5.1.1：開始倒數後就暫停框選，一般晃動不影響，只有大幅移動才停；設定 countdown，預設關；拍攝畫面 AI 按鈕右邊的碼錶按鈕，手動拍攝時隱藏） ----------
    自動拍攝時框選鎖不到 2 秒、而且畫面拿穩（frameSig 每 0.15 秒比一次，差 > 10 就重數）→ 中央圓環倒數 5、4、3、2、1（每秒嗶一聲）→ 拍下整個畫面
    （和自己按快門一樣：開著自動 AI 框選就交給 AI 框，否則標 ✂ 待裁切）。點相機畫面取消；拍下或取消後，畫面明顯改變（差 > 18，翻頁、換紙）才會再倒數，同一頁不會重拍。
    倒數中原本的偵測或 TEED 鎖到合理的框 → 停止倒數，走正常流程。開著倒數時不顯示 4 秒「直接按快門」提示 */
@@ -1222,11 +1222,17 @@ function cdTick(v) {
   live.cdNext = now + 150;
   const sig = frameSig(v);
   if (live.cdBlock) { if (sigDiff(sig, live.cdBlock) > CD_CHANGE) live.cdBlock = null; else { cdStop(); live.cdPrev = sig; return; } }
-  const want = live.armed && !live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > CD_AFTER;
-  const moving = live.cdPrev && sigDiff(sig, live.cdPrev) > CD_MOVE;
+  const diff = live.cdPrev ? sigDiff(sig, live.cdPrev) : 0;
   live.cdPrev = sig;
-  if (!want || moving) { cdStop(); return; }
-  if (live.cdT0 == null) { live.cdT0 = now; live.cdLastN = 6; }
+  if (live.cdT0 != null) {
+    // 5.1.1：倒數已經開始：不再框選、一般晃動不影響；只有大幅移動（翻頁、換位置，和「翻頁後重新倒數」同一標準）才停下，重新等 2 秒
+    if (!live.armed || diff > CD_CHANGE) { cdStop(); live.idleT0 = now; return; }
+  } else {
+    const want = live.armed && !live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > CD_AFTER;
+    if (!want || diff > CD_MOVE) return; // 開始倒數前要拿穩
+    live.cdT0 = now; live.cdLastN = 6;
+    resetLock(); setRing(0); live.tCand = []; // 5.1.1：開始倒數就暫停框選，畫面上不顯示框
+  }
   const el = now - live.cdT0, n = Math.ceil((CD_LEN - el) / 1000);
   live.cd = true;
   if (n >= 1 && n < live.cdLastN) { live.cdLastN = n; sfxPlay('tick'); }
@@ -1237,9 +1243,9 @@ async function liveLoop() {
   const v = $('#video');
   // 手動模式不找框（1.19）；提示語只顯示 3 秒（1.20，作者覺得一直掛著礙眼）
   if (!settings.autoShutter && !live.paused && !live.capturing) { if (performance.now() < (live.manualHintUntil || 0)) setHint(MANUAL_HINT); else hideHint(); }
-  if (workerReady && settings.autoShutter && !live.paused && !live.capturing && v.videoWidth) teedTick(v); // 4.3
+  if (workerReady && settings.autoShutter && !live.paused && !live.capturing && v.videoWidth && !live.cd) teedTick(v); // 4.3；5.1.1 倒數中不跑
   cdTick(v); // 5.1
-  if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth && !teedOwns()) {
+  if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth && !teedOwns() && !live.cd) { // 5.1.1：倒數中不偵測
     live.detecting = true;
     try {
       // 進入穩定倒數後，每一格都先存全解析度畫面（與偵測用的是同一瞬間）
@@ -1296,6 +1302,7 @@ function quadPlausible(q) {
 function onDetect(r, sig, full, sharp, gt, src) {
   if (!live.running || live.capturing) return;
   src = src || 'det';
+  if (live.cd) return; // 5.1.1：倒數中不框選（倒數開始前送出的偵測結果也丟掉）
   if (src === 'det' && teedOwns()) return; // 4.3：TEED 鎖定的頁、或 TEED 負責判斷換頁時，原本的偵測不參與
   const tq = src === 'teed'; // 4.3：TEED 一秒只有 1～2 格，累積的格數門檻較低
   const now = performance.now();
@@ -4546,7 +4553,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.1';
+const APP_VER = '5.1.1';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
