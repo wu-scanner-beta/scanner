@@ -1238,13 +1238,42 @@ async function liveLoop() {
   if (live.running) setTimeout(liveLoop, settings.autoShutter && performance.now() - (live.seenT || 0) > 3000 ? 200 : 20);
 }
 
+/* 5.0.2：即時掃描的框要「像一張紙」才算數（作者：白色背景時常出現貼著畫面邊框的怪框，還會鎖定，TEED 因此沒機會上場）
+   - 兩條以上的邊貼著畫面邊框（兩端都在 1.5% 內）：真正的紙四周一定會露出背景，這是把畫面邊框當成紙邊
+   - 四個角要在 70～110 度、相對兩邊長度差不到 1.5 倍、凸四邊形（作者 95 張樣張正確的紙是 79～99 度、最多 1.27 倍）
+   作者 4 段影片 250 格：擋掉 88／128 個錯框，誤擋 0／120 個正確框；錄影裡的兩個怪框都擋得到 */
+const QP_EDGE = 0.015, QP_AMIN = 70, QP_AMAX = 110, QP_OPP = 1.5;
+function quadPlausible(q) {
+  if (!q || q.length !== 4) return false;
+  let hug = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i], b = q[(i + 1) % 4];
+    for (const k of [0, 1]) for (const e of [0, 1]) if (Math.abs(a[k] - e) < QP_EDGE && Math.abs(b[k] - e) < QP_EDGE) hug++;
+  }
+  if (hug >= 2) return false;
+  const v = $('#video'), ar = v && v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 0.75; // 角度要用實際比例算
+  const P = q.map((p) => [p[0] * ar, p[1]]);
+  let sgn = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = P[(i + 3) % 4], b = P[i], c = P[(i + 1) % 4];
+    const x1 = a[0] - b[0], y1 = a[1] - b[1], x2 = c[0] - b[0], y2 = c[1] - b[1];
+    const ang = (Math.acos(Math.max(-1, Math.min(1, (x1 * x2 + y1 * y2) / (Math.hypot(x1, y1) * Math.hypot(x2, y2) || 1)))) * 180) / Math.PI;
+    if (ang < QP_AMIN || ang > QP_AMAX) return false;
+    const cr = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]), s1 = Math.sign(cr);
+    if (!s1 || (sgn && s1 !== sgn)) return false;
+    sgn = s1;
+  }
+  const L = [0, 1, 2, 3].map((i) => Math.hypot(P[(i + 1) % 4][0] - P[i][0], P[(i + 1) % 4][1] - P[i][1]));
+  const rt = (x, y) => Math.max(x, y) / Math.max(1e-9, Math.min(x, y));
+  return rt(L[0], L[2]) <= QP_OPP && rt(L[1], L[3]) <= QP_OPP;
+}
 function onDetect(r, sig, full, sharp, gt, src) {
   if (!live.running || live.capturing) return;
   src = src || 'det';
   if (src === 'det' && teedOwns()) return; // 4.3：TEED 鎖定的頁、或 TEED 負責判斷換頁時，原本的偵測不參與
   const tq = src === 'teed'; // 4.3：TEED 一秒只有 1～2 格，累積的格數門檻較低
   const now = performance.now();
-  const ok = r && r.area > 0.1;
+  const ok = r && r.area > 0.1 && quadPlausible(r.corners); // 5.0.2：不像一張紙的框當作沒找到
   const qs = ok ? quadSig(gt, r.corners) : null;
   // 4.2：自動拍攝時框選鎖不到 4 秒，提示可以直接按快門（快門鈕呼吸）；鎖到或拍下就收起，每一頁都會再提示
   //（4.1.7 原本是 10 秒後提示一次改成手動拍攝）
@@ -4453,7 +4482,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.0.1';
+const APP_VER = '5.0.2';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
