@@ -754,7 +754,7 @@ async function aiCorners(blob) {
     let r = null;
     try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); }
     if (!r || !r.corners) return { fail: 'reject', msg: r && r.reject };
-    return { corners: r.corners, curve: r.curve ? normCurve(r.corners, r.curve) : null };
+    return { corners: r.corners, curve: r.curve ? normCurve(r.corners, r.curve) : null, teed: teedNote(r) };
   } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
 }
 $('#fileCamera').addEventListener('change', async (e) => {
@@ -767,7 +767,7 @@ $('#fileCamera').addEventListener('change', async (e) => {
   if (await aiAutoOn()) {
     busy('AI 框選中…');
     const r = await aiCorners(blob);
-    if (r.corners) { corners = r.corners; curve = r.curve; }
+    if (r.corners) { corners = r.corners; curve = r.curve; if (r.teed && teedMarkOn()) toast(r.teed); }
     else toast(r.fail === 'reject' ? 'AI 判斷不適合，保留原框' : 'AI 框選失敗：' + (r.msg || '未知原因'));
   }
   unbusy();
@@ -790,7 +790,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
   let docId = cameraTarget;
   if (!docId) docId = (await createDoc()).id;
   const useAI = await aiAutoOn();
-  let rejected = 0, aiErr = null;
+  let rejected = 0, aiErr = null, tdone = 0;
   // 4.2.2：開著自動 AI 框選時，和 4.2.1 的批次框選一樣先暫停頁面處理、全部框完再處理（相簿照片解析度高，一邊框一邊處理容易閃退）
   if (useAI) { busy(`AI 框選中 1 / ${files.length}`); await holdQueue(); aiBatchMark(true); }
   try {
@@ -801,7 +801,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
       let c = await detectBlob(blob), cv = null;
       if (useAI) {
         const r = await aiCorners(blob);
-        if (r.corners) { c = r.corners; cv = r.curve; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
+        if (r.corners) { c = r.corners; cv = r.curve; if (r.teed) tdone++; } else if (r.fail === 'reject') rejected++; else aiErr = aiErr || r.msg || '未知原因';
       }
       await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
@@ -810,7 +810,8 @@ $('#fileGallery').addEventListener('change', async (e) => {
   unbusy();
   openDoc(docId, current !== 'doc');
   if (aiErr) toast('AI 框選失敗：' + aiErr);
-  else if (rejected) toast(files.length === 1 ? 'AI 判斷不適合，保留原框' : `${rejected} 張 AI 判斷不適合，保留原框`);
+  else if (rejected) toast((files.length === 1 ? 'AI 判斷不適合，保留原框' : `${rejected} 張 AI 判斷不適合，保留原框`) + teedCount(tdone));
+  else if (teedCount(tdone)) toast(`AI 框選完成${teedCount(tdone)}`); // 5.0
 });
 
 /* ---------- 即時掃描 ---------- */
@@ -1332,10 +1333,11 @@ function drawOverlay() {
     ctx.globalAlpha = live.fade;
     ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
     // 綠色隨倒數逐漸變濃
-    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
+    const gold = settings.teedMark && live.lockSrc === 'teed' && !live.edge; // 5.0：TEED 協助標記開著時，TEED 找到的框用金色
+    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : gold ? `rgba(255,200,40,${0.12 + 0.3 * pr})` : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
     ctx.fill();
     ctx.lineWidth = 3 + pr; ctx.lineJoin = 'round';
-    ctx.strokeStyle = live.edge ? '#F2C48D' : '#A8D4A1';
+    ctx.strokeStyle = live.edge ? '#F2C48D' : gold ? '#FFC828' : '#A8D4A1';
     ctx.stroke();
     ctx.fillStyle = '#fff';
     pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill(); });
@@ -1495,7 +1497,7 @@ async function capture(sig, full, quadAt, userPress) {
         if (!fx) busy('AI 框選中…');
         try {
           const r = await aiFixPage(page.id, blob, corners, true);
-          if (r && r.corners) { corners = r.corners; curve = r.curve; } else aiReport(r, live.count);
+          if (r && r.corners) { corners = r.corners; curve = r.curve; if (r.teed && teedMarkOn()) setTimeout(() => toast(r.teed), 600); } else aiReport(r, live.count);
         } finally { if (!fx) unbusy(); aiReleaseNow(); } // 4.2.3：立即裁切每張都用 AI，原本引擎從頭到尾不釋放
       }
       if (fx) { fx.release(); await fx.ready; }
@@ -1783,7 +1785,7 @@ async function aiFixPage(pageId, blob, c0, keepCrop) {
     enqueue(p.id);
     if (current === 'doc' && state.docId === p.docId) onPageUpdated(p.id);
     if (live.running && live.lastPageId === p.id) refreshLiveThumb(p.id);
-    return { corners: p.corners, curve: p.curve };
+    return { corners: p.corners, curve: p.curve, teed: teedNote(r) };
   } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
 }
 // 1.31：背景 AI 的狀態（左下角縮圖上方的「AI n」標籤）；不適合或失敗時提示
@@ -1812,7 +1814,7 @@ function aiBg(pageId, blob, c0, n) {
 }
 // Android：按「完成」後把這次拍的頁一次用 AI 框好
 async function aiRunLater(ids) {
-  let done = 0, firstErr = null;
+  let done = 0, firstErr = null, tdone = 0;
   busy(`AI 框選中 1 / ${ids.length}`);
   await holdQueue(); aiBatchMark(true);
   try {
@@ -1820,12 +1822,12 @@ async function aiRunLater(ids) {
       busy(`AI 框選中 ${i + 1} / ${ids.length}`);
       const p = await DB.get('pages', ids[i]); if (!p || isBroken(p)) continue;
       const r = await aiFixPage(p.id, p.original, p.corners, false);
-      if (r && r.corners) done++;
+      if (r && r.corners) { done++; if (r.teed) tdone++; }
       else if (r && r.fail === 'error' && !firstErr) firstErr = r.msg;
     }
   } finally { aiBatchMark(false); unbusy(); releaseQueue(); aiReleaseSoon(); }
   if (current === 'doc') renderDoc();
-  toast(firstErr ? `AI 框選失敗：${firstErr}` : `AI 框選完成：${done} / ${ids.length} 頁${done < ids.length ? '（其餘判斷不適合，保留原框）' : ''}`);
+  toast(firstErr ? `AI 框選失敗：${firstErr}` : `AI 框選完成：${done} / ${ids.length} 頁${done < ids.length ? '（其餘判斷不適合，保留原框）' : ''}${teedCount(tdone)}`);
 }
 let torchOn = false;
 $('#torchBtn').onclick = async () => {
@@ -3734,7 +3736,21 @@ $('#btnSettings').onclick = () => {
     <button class="srow" id="setLog"><span>更新日誌 ›<span class="sub">目前版本 v${APP_VER}</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="note" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
+    <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成金色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
+    <div class="note" id="setVer" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
+    // 5.0：連點版本號碼 5 次，顯示／隱藏「顯示 TEED 協助標記」開關（隱藏時一併關掉標記）
+    let verTaps = 0, verT = 0;
+    s.querySelector('#setVer').onclick = () => {
+      clearTimeout(verT); verT = setTimeout(() => { verTaps = 0; }, 1500);
+      if (++verTaps < 5) return;
+      verTaps = 0;
+      settings.teedMarkShown = !settings.teedMarkShown;
+      if (!settings.teedMarkShown) settings.teedMark = false;
+      saveSettings();
+      const row = s.querySelector('#teedMarkRow'); row.style.display = settings.teedMarkShown ? '' : 'none';
+      row.querySelector('.tg').classList.toggle('on', !!settings.teedMark);
+      toast(settings.teedMarkShown ? '已顯示「TEED 協助標記」開關' : '已隱藏「TEED 協助標記」開關');
+    };
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
     // 3.0：還在用舊 AI 引擎的人（按過「暫時不要」或還沒被問）才顯示，升級後消失（3.0.1 搬到自動 AI 框選開關下方）
     // 3.0.1：自動 AI 框選開關（和拍攝畫面的 AI 按鈕同一個設定，整個 App 共用）；下面一行顯示 AI 資料的狀態。
@@ -4121,6 +4137,15 @@ function teedFetchBg() {
   return teedFetching;
 }
 setTimeout(() => { if (navigator.onLine !== false) teedFetchBg(); }, 8000);
+// 5.0：TEED 協助標記（設定裡隱藏的開關，作者測試用）：這次的 AI 框選 TEED 有沒有介入
+function teedNote(r) {
+  const src = r && r.fuse && r.fuse.src;
+  if (!r || !r.corners || !src || !src.includes('t')) return null;
+  if (src === 'tttt' && !r.aiCorners) return 'TEED 補框';
+  return 'TEED 協助：' + ['上', '右', '下', '左'].filter((_, i) => src[i] === 't').map((x) => x + '邊').join('、');
+}
+const teedMarkOn = () => !!settings.teedMark;
+const teedCount = (n) => (teedMarkOn() && n ? `（TEED 協助 ${n} 頁）` : '');
 function aiRejectMsg(r) {
   return r && r.reject === 'book' ? '這頁看起來是攤開的書，AI 框選不適合，請用「自動偵測」或手動調整' : 'AI 找不到合適的紙張範圍，請手動調整';
 }
@@ -4137,7 +4162,8 @@ $('#cropAI').onclick = async () => {
     if (r.curve) c.curve = normCurve(c.corners, r.curve);
     else c.curve = c.curveMode ? straightCurve(c.corners) : null;
     drawCrop();
-    toast(r.curve ? '已用 AI 框選，並貼合書頁彎曲' : '已用 AI 框選，可以再微調');
+    const tn = teedMarkOn() && teedNote(r); // 5.0
+    toast((r.curve ? '已用 AI 框選，並貼合書頁彎曲' : '已用 AI 框選，可以再微調') + (tn ? `｜${tn}` : ''));
   } catch (e) { console.warn(e); toast('AI 框選失敗：' + e.message); }
   finally { unbusy(); }
 };
@@ -4152,7 +4178,7 @@ async function aiFrameDoc() {
   let overwrite = true;
   if (mine) overwrite = confirm(`有 ${mine} 頁自己調整過範圍。\n要一起用 AI 重新框選嗎？\n\n確定：全部重新框選\n取消：保留那幾頁`);
   const before = [], tag = 'ai:' + Date.now();
-  let changed = 0, kept = 0;
+  let changed = 0, kept = 0, tdone = 0;
   busy(`AI 框選中 1 / ${pages.length}`);
   await holdQueue(); aiBatchMark(true);
   try {
@@ -4163,6 +4189,7 @@ async function aiFrameDoc() {
       let r = null;
       try { const { img, url } = await loadImg(p.original); try { r = await aiFrame(img); } finally { URL.revokeObjectURL(url); } }
       catch (e) { console.warn('ai page', e); }
+      if (teedNote(r)) tdone++;
       if (r && r.corners && !(nearSame(r.corners, p.corners) && !p.curve && !r.curve)) {
         pushHist(p, tag);
         before.push({ id: p.id, corners: p.corners, curve: p.curve || null, needCrop: !!p.needCrop, cropUser: !!p.cropUser });
@@ -4174,7 +4201,7 @@ async function aiFrameDoc() {
     }
   } finally { aiBatchMark(false); unbusy(); releaseQueue(); aiReleaseSoon(); }
   if (current === 'doc' && state.docId === docId) renderDoc();
-  undoBar(`AI 框選完成：${changed} 頁已重新框選${kept ? `，${kept} 頁維持原框` : ''}`, changed ? async () => {
+  undoBar(`AI 框選完成：${changed} 頁已重新框選${kept ? `，${kept} 頁維持原框` : ''}${teedCount(tdone)}`, changed ? async () => {
     for (const b of before) {
       const p = await DB.get('pages', b.id); if (!p) continue;
       p.corners = b.corners; p.curve = b.curve; if (b.needCrop) p.needCrop = true; else delete p.needCrop;
@@ -4361,7 +4388,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '4.3.1';
+const APP_VER = '5.0';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4394,9 +4421,13 @@ const CHANGELOG = [
     { t: '最佳化高畫質拍照流程體驗', since: '4.0' },
     { t: '新增 ✨ AI 精修：讓樂譜線條與文字更清晰', since: '4.1.2' },
     { t: '最佳化拍攝運作流程，減少拍攝時發熱', since: '4.1.7' },
+  ] },
+  // 5.0：加入 TEED 邊緣模型的 AI 框選升級（作者選的切法：4.2 起的框選改進都放 v5）
+  { v: 'v5', items: [
     { t: '最佳化淺色背景AI框選準確度', since: '4.2' },
     { t: '偵測不到框選範圍時，將提示直接按快門', since: '4.2' },
     { t: '淺色背景即時掃描時，也能自動找到框選範圍', since: '4.3' },
+    { t: '提升 AI 框選穩定性，減少一次處理多張時閃退', since: '5.0' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
