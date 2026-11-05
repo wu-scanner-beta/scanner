@@ -894,6 +894,7 @@ async function startLive(docId) {
     aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false, camOff: false,
     seenT: performance.now(), idleT0: performance.now(), tipOn: false, // 4.1.7
     teedOK: false, teedBusy: false, teedNext: 0, teedErr: 0, capSrc: null, tT0: null, tCapped: false, tCapSig: null, // 4.3
+    cd: null, cdT0: null, cdBlock: null, cdPrev: null, cdNext: 0, // 5.1
   });
   aiHas([TEED_FILE]).then((ok) => { if (live.running) live.teedOK = ok; }); // 4.3：有 TEED 才有即時後援
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
@@ -1207,12 +1208,37 @@ async function teedLiveRun(v) {
   if (!teedWanted(performance.now())) return; // 這段時間原本的偵測鎖到了、拍下了、或離開了
   onDetect(r, sig, full, sharp, gt, 'teed');
 }
+/* ---------- 5.1 倒數拍攝（設定 countdown，預設關；拍攝畫面 AI 按鈕右邊的碼錶按鈕，手動拍攝時隱藏） ----------
+   自動拍攝時框選鎖不到 2 秒、而且畫面拿穩（frameSig 每 0.15 秒比一次，差 > 10 就重數）→ 中央圓環倒數 5、4、3、2、1（每秒嗶一聲）→ 拍下整個畫面
+   （和自己按快門一樣：開著自動 AI 框選就交給 AI 框，否則標 ✂ 待裁切）。點相機畫面取消；拍下或取消後，畫面明顯改變（差 > 18，翻頁、換紙）才會再倒數，同一頁不會重拍。
+   倒數中原本的偵測或 TEED 鎖到合理的框 → 停止倒數，走正常流程。開著倒數時不顯示 4 秒「直接按快門」提示 */
+const CD_AFTER = 2000, CD_LEN = 5000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
+const cdOn = () => !!(settings.countdown && settings.autoShutter);
+function cdStop() { live.cdT0 = null; live.cd = null; }
+function cdTick(v) {
+  const now = performance.now();
+  if (!cdOn() || !live.running || live.paused || live.capturing || !v.videoWidth) { cdStop(); return; }
+  if (now < (live.cdNext || 0)) return;
+  live.cdNext = now + 150;
+  const sig = frameSig(v);
+  if (live.cdBlock) { if (sigDiff(sig, live.cdBlock) > CD_CHANGE) live.cdBlock = null; else { cdStop(); live.cdPrev = sig; return; } }
+  const want = live.armed && !live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > CD_AFTER;
+  const moving = live.cdPrev && sigDiff(sig, live.cdPrev) > CD_MOVE;
+  live.cdPrev = sig;
+  if (!want || moving) { cdStop(); return; }
+  if (live.cdT0 == null) { live.cdT0 = now; live.cdLastN = 6; }
+  const el = now - live.cdT0, n = Math.ceil((CD_LEN - el) / 1000);
+  live.cd = true;
+  if (n >= 1 && n < live.cdLastN) { live.cdLastN = n; sfxPlay('tick'); }
+  if (el >= CD_LEN) { cdStop(); capture(sig, null, null, true); }
+}
 async function liveLoop() {
   if (!live.running) return;
   const v = $('#video');
   // 手動模式不找框（1.19）；提示語只顯示 3 秒（1.20，作者覺得一直掛著礙眼）
   if (!settings.autoShutter && !live.paused && !live.capturing) { if (performance.now() < (live.manualHintUntil || 0)) setHint(MANUAL_HINT); else hideHint(); }
   if (workerReady && settings.autoShutter && !live.paused && !live.capturing && v.videoWidth) teedTick(v); // 4.3
+  cdTick(v); // 5.1
   if (workerReady && settings.autoShutter && !live.paused && !live.detecting && !live.capturing && v.videoWidth && !teedOwns()) {
     live.detecting = true;
     try {
@@ -1277,7 +1303,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   const qs = ok ? quadSig(gt, r.corners) : null;
   // 4.2：自動拍攝時框選鎖不到 4 秒，提示可以直接按快門（快門鈕呼吸）；鎖到或拍下就收起，每一頁都會再提示
   //（4.1.7 原本是 10 秒後提示一次改成手動拍攝）
-  if (live.armed && settings.autoShutter && !live.tipOn && !live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > TIP_MS) live.tipOn = true;
+  if (live.armed && settings.autoShutter && !cdOn() && !live.tipOn && !live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > TIP_MS) live.tipOn = true; // 5.1：開著倒數時不顯示
   tipSync();
   live.dbg = { motion: live.prevQs && qs ? qsDiff(qs, live.prevQs) : null, change: live.capturedQs && qs ? qsDiff(qs, live.capturedQs) : null };
 
@@ -1300,7 +1326,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   if (!ok) {
     if (tq) { live.tCand = []; if (live.lockQ) { if (++live.miss >= 2) resetLock(); } }
     else { live.miss++; live.cand = []; if (live.miss >= 4 && live.lockQ) resetLock(); }
-    if (!live.lockQ) { setRing(0); setHint(live.tipOn ? waitTip() : live.count ? '放入下一頁' : '將文件放進畫面中'); }
+    if (!live.lockQ) { setRing(0); setHint(live.cd ? CD_HINT : live.tipOn ? waitTip() : live.count ? '放入下一頁' : '將文件放進畫面中'); }
     return;
   }
   live.miss = 0;
@@ -1312,7 +1338,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
     const C = tq ? 'tCand' : 'cand', need = tq ? 2 : 3;
     if (live[C].length && maxDisp(q, live[C][live[C].length - 1]) > 0.05) live[C] = [];
     live[C].push(q);
-    if (live[C].length < need) { setHint(live.tipOn ? waitTip() : '尋找文件中…'); return; }
+    if (live[C].length < need) { setHint(live.cd ? CD_HINT : live.tipOn ? waitTip() : '尋找文件中…'); return; }
     live.lockQ = medianQuad(live[C]);
     live.acc = live[C].slice();
     live.cand = []; live.tCand = []; live.lockSrc = src; live.tT0 = null;
@@ -1350,7 +1376,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   live.edge = edgeBlocked(live.lockQ);
   if (live.edge) {
     live.stableSince = now; live.progress = 0; live.best = null;
-    setRing(0); setHint(live.tipOn ? waitTip() : '請稍微拉遠一點'); return;
+    setRing(0); setHint(live.cd ? CD_HINT : live.tipOn ? waitTip() : '請稍微拉遠一點'); return;
   }
 
   // 記錄倒數期間最清楚的一格
@@ -1403,6 +1429,19 @@ function videoRect() {
   const s = Math.min(st.width / vw, st.height / vh);
   return { x: (st.width - vw * s) / 2, y: (st.height - vh * s) / 2, w: vw * s, h: vh * s, cw: st.width, ch: st.height };
 }
+function centerRing(ctx, c, p, num, color, alpha) {
+  const r = num ? 40 : 30;
+  ctx.save(); ctx.globalAlpha = alpha == null ? 1 : alpha; ctx.lineCap = 'round';
+  ctx.lineWidth = num ? 7 : 6; ctx.strokeStyle = 'rgba(255,255,255,.38)';
+  ctx.beginPath(); ctx.arc(c[0], c[1], r, 0, Math.PI * 2); ctx.stroke();
+  ctx.strokeStyle = color; ctx.beginPath(); ctx.arc(c[0], c[1], r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(0.001, p)); ctx.stroke();
+  if (num) {
+    ctx.fillStyle = 'rgba(0,0,0,.35)'; ctx.beginPath(); ctx.arc(c[0], c[1], r - 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = '800 34px -apple-system,"PingFang TC","Noto Sans TC",sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(String(num), c[0], c[1] + 1);
+  }
+  ctx.restore();
+}
 function drawOverlay() {
   if (!live.running) return;
   if (live.camOff) { requestAnimationFrame(drawOverlay); return; } // 3.1.5 相機暫停時不重畫
@@ -1434,6 +1473,13 @@ function drawOverlay() {
     ctx.fillStyle = '#fff';
     pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill(); });
     ctx.globalAlpha = 1;
+    // 5.1 聚焦：框的中央一個圓環跟著穩定進度填滿，填滿就拍（拍攝動畫關閉時不畫）
+    if (settings.autoShutter && live.armed && !live.edge && pr > 0 && animOn()) centerRing(ctx, [pts.reduce((a, p) => a + p[0], 0) / 4, pts.reduce((a, p) => a + p[1], 0) / 4], pr, null, gold ? '#FFC828' : '#7ED67E', live.fade);
+  }
+  // 5.1 倒數拍攝：畫面中央的圓環，中間顯示 5～1
+  if (live.cd && live.cdT0 != null && !live.capturing) {
+    const el = performance.now() - live.cdT0;
+    centerRing(ctx, [R.x + R.w / 2, R.y + R.h / 2], Math.min(1, el / CD_LEN), Math.max(1, Math.ceil((CD_LEN - el) / 1000)), '#7ED67E', 1);
   }
   requestAnimationFrame(drawOverlay);
 }
@@ -1480,6 +1526,7 @@ async function capture(sig, full, quadAt, userPress) {
   live.tT0 = null; live.tCapped = false;
   const v = $('#video');
   if (!sig) sig = frameSig(v);
+  cdStop(); live.cdBlock = sig; // 5.1：畫面明顯改變才會再倒數
   setRing(0);
   // 3.1 拍攝動畫：拍下那一格先存一張小圖（Android 另外拍照要等，先用預覽畫面）；立即裁切＝每一張都進框選（自動拍攝也一樣）
   const fxOn = animOn(), now2crop = !settings.cropLater;
@@ -1775,6 +1822,7 @@ function tipSync() { const b = $('#shutter'); if (b) b.classList.toggle('nudge',
 function manualHint() { live.manualHintUntil = performance.now() + 3000; setHint(MANUAL_HINT); }
 function updateLiveBtns() {
   $('#aiBtn').classList.toggle('on', !!settings.autoAI);
+  $('#cdBtn').classList.toggle('on', !!settings.countdown); $('#cdBtn').style.display = settings.autoShutter ? '' : 'none'; // 5.1：手動拍攝時隱藏，開關狀態不變
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
   $('#cropModeBtn').textContent = settings.cropLater ? '稍後裁切' : '立即裁切';
@@ -1796,6 +1844,17 @@ $('#cropModeBtn').onclick = () => {
   else liveTip('立即裁切', '每拍一張就進入裁切畫面<br>確認成品後再拍下一張');
 };
 $('#liveClose').onclick = () => finishLive();
+$('#cdBtn').onclick = () => {
+  sfxPrime();
+  settings.countdown = !settings.countdown; saveSettings(); cdStop(); updateLiveBtns();
+  liveTip('倒數拍攝', settings.countdown ? '偵測不到框選範圍時<br>倒數 5 秒自動拍下（點畫面可取消）' : '已關閉倒數拍攝');
+};
+// 5.1：倒數中點相機畫面取消，這一頁不再倒數，畫面明顯改變後才重新開始
+$('#live .stage').addEventListener('click', (e) => {
+  if (!live.cd || e.target.closest('button,.pill,#liveTip,#camTip')) return;
+  cdStop(); live.cdBlock = frameSig($('#video'));
+  toast('已取消倒數，翻頁或換紙後會重新開始');
+});
 $('#liveDone').onclick = () => finishLive();
 $('#liveThumb').onclick = () => finishLive();
 $('#autoBtn').onclick = () => {
@@ -1986,6 +2045,10 @@ function sfxBuild(name) {
     const a = out(0.2); add(a, click(1), 0); add(a, click(0.7), 0.075);
     return norm(a, 0.9);
   }
+  if (name === 'tick') { // 5.1 倒數拍攝每秒一聲短促的「嗶」
+    const a = out(0.09); for (let i = 0; i < a.length; i++) { const t = i / sr; a[i] = Math.sin(2 * Math.PI * 1320 * t) * Math.min(1, t / 0.004) * Math.exp(-t / 0.03); }
+    return norm(a, 0.7);
+  }
   if (name === 'ding') { // 4.0：只留原本掃描音效最後的「叮」（刷的聲音拿掉）；用同一段合成再取 0.78 秒之後，音量與音色和 3.1 一樣
     const a = sfxBuild('scan'); return a.slice(Math.round(0.78 * sr));
   }
@@ -2004,7 +2067,7 @@ function sfxBuild(name) {
   add(a, ch, 0.78);
   return norm(a, 0.8);
 }
-const SFX_GAIN = { shutter: 0.4, scan: 0.45, ding: 0.45 }; // 提示音：比一般影片聲音小一點
+const SFX_GAIN = { shutter: 0.4, scan: 0.45, ding: 0.45, tick: 0.3 }; // 提示音：比一般影片聲音小一點
 function sfxPlay(name) {
   if (settings.sound === false || !sfx.ctx) return;
   try {
@@ -3812,6 +3875,7 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>即時掃描自動拍攝<small>文件穩定約 1 秒後自動按快門</small></span><button class="tg ${settings.autoShutter ? 'on' : ''}" data-k="autoShutter"></button></div>
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
     <div class="switch"><span>✨ 自動 AI 框選<small id="aiStat">即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選紙張</small></span><button class="tg ${settings.autoAI ? 'on' : ''}" id="setAuto"></button></div>
+    <div class="switch"><span>倒數拍攝<small>即時掃描偵測不到框選範圍時，倒數 5 秒自動拍下（只在自動拍攝時）</small></span><button class="tg ${settings.countdown ? 'on' : ''}" data-k="countdown"></button></div>
     <div class="switch"><span>拍攝動畫<small id="animNote">即時掃描拍下時的攤平、掃描光動畫；手機較舊覺得卡可以關掉</small></span><button class="tg ${animPref() ? 'on' : ''}" id="setAnim"></button></div>
     <div class="switch"><span>拍攝音效<small>快門聲與掃描音效，跟著手機音量（iPhone 開靜音時不會響）</small></span><button class="tg ${settings.sound !== false ? 'on' : ''}" data-k="sound"></button></div>
     <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
@@ -4482,7 +4546,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.0.2';
+const APP_VER = '5.1';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4522,6 +4586,8 @@ const CHANGELOG = [
     { t: '偵測不到框選範圍時，將提示直接按快門', since: '4.2' },
     { t: '淺色背景即時掃描時，也能自動找到框選範圍', since: '4.3' },
     { t: '提升 AI 框選穩定性，減少一次處理多張時閃退', since: '5.0' },
+    { t: '新增倒數拍攝按鈕：當偵測不到框選範圍時，將自動倒數 5 秒拍下', since: '5.1' },
+    { t: '加入拍攝聚焦動畫，框到後更有預備感', since: '5.1' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
