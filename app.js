@@ -1077,7 +1077,7 @@ function medianQuad(list) {
   return [0, 1, 2, 3].map((i) => [med(list.map((q) => q[i][0])), med(list.map((q) => q[i][1]))]);
 }
 function resetLock() {
-  Object.assign(live, { cand: [], tCand: [], lockSrc: null, acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
+  Object.assign(live, { edgeT0: 0, cand: [], tCand: [], lockSrc: null, acc: [], lockQ: null, outliers: 0, miss: 0, anchorQ: null, stableSince: 0, progress: 0, best: null, prevQs: null, lastQs: null, edge: false, motionHits: 0, moveHits: 0 });
   live.lastQuad = null;
 }
 // 清晰度（梯度能量），用來從穩定期間挑最清楚的一格
@@ -1212,7 +1212,7 @@ async function teedLiveRun(v) {
    自動拍攝時框選鎖不到 2 秒、而且畫面拿穩（frameSig 每 0.15 秒比一次，差 > 10 就重數）→ 中央圓環倒數 5、4、3、2、1（每秒嗶一聲）→ 拍下整個畫面
    （和自己按快門一樣：開著自動 AI 框選就交給 AI 框，否則標 ✂ 待裁切）。點相機畫面取消；拍下或取消後，畫面明顯改變（差 > 18，翻頁、換紙）才會再倒數，同一頁不會重拍。
    倒數中原本的偵測或 TEED 鎖到合理的框 → 停止倒數，走正常流程。開著倒數時不顯示 4 秒「直接按快門」提示 */
-const CD_AFTER = 2000, CD_LEN = 5000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
+const CD_EDGE = 3000, CD_AFTER = 2000, CD_LEN = 5000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
 const cdOn = () => !!(settings.countdown && settings.autoShutter);
 function cdStop() { live.cdT0 = null; live.cd = null; }
 function cdTick(v) {
@@ -1228,7 +1228,9 @@ function cdTick(v) {
     // 5.1.1：倒數已經開始：不再框選、一般晃動不影響；只有大幅移動（翻頁、換位置，和「翻頁後重新倒數」同一標準）才停下，重新等 2 秒
     if (!live.armed || diff > CD_CHANGE) { cdStop(); live.idleT0 = now; return; }
   } else {
-    const want = live.armed && !live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > CD_AFTER;
+    // 5.1.2：框一直卡在「請稍微拉遠一點」超過 3 秒也可以倒數（拍下後交給 AI 框）
+    const stuck = live.lockQ && live.edge && live.edgeT0 && now - live.edgeT0 > CD_EDGE;
+    const want = live.armed && (stuck || (!live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > CD_AFTER));
     if (!want || diff > CD_MOVE) return; // 開始倒數前要拿穩
     live.cdT0 = now; live.cdLastN = 6;
     resetLock(); setRing(0); live.tCand = []; // 5.1.1：開始倒數就暫停框選，畫面上不顯示框
@@ -1283,6 +1285,9 @@ function quadPlausible(q) {
     for (const k of [0, 1]) for (const e of [0, 1]) if (Math.abs(a[k] - e) < QP_EDGE && Math.abs(b[k] - e) < QP_EDGE) hug++;
   }
   if (hug >= 2) return false;
+  // 5.1.2：一條邊從畫面的一角延伸到另一角（兩端都在角落 3% 內）＝把畫面邊框當成紙邊（作者截圖：上方被淺色布蓋住，框的上緣就是畫面上緣）
+  const atCorner = (p) => Math.min(p[0], 1 - p[0]) < 0.03 && Math.min(p[1], 1 - p[1]) < 0.03;
+  for (let i = 0; i < 4; i++) if (atCorner(q[i]) && atCorner(q[(i + 1) % 4])) return false;
   const v = $('#video'), ar = v && v.videoWidth && v.videoHeight ? v.videoWidth / v.videoHeight : 0.75; // 角度要用實際比例算
   const P = q.map((p) => [p[0] * ar, p[1]]);
   let sgn = 0;
@@ -1381,6 +1386,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   // 紙張太靠近畫面邊緣：照片四周會沒有空間可以重新裁切，先不拍
   // 1.19：只有「一整條邊」貼著畫面的一側（例如書本攤開，旁邊那頁超出畫面）照樣可以拍；兩側以上或只有一個角碰到才擋
   live.edge = edgeBlocked(live.lockQ);
+  if (live.edge) { if (!live.edgeT0) live.edgeT0 = now; } else live.edgeT0 = 0; // 5.1.2：卡在「拉遠一點」多久
   if (live.edge) {
     live.stableSince = now; live.progress = 0; live.best = null;
     setRing(0); setHint(live.cd ? CD_HINT : live.tipOn ? waitTip() : '請稍微拉遠一點'); return;
@@ -4553,7 +4559,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.1.1';
+const APP_VER = '5.1.2';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
