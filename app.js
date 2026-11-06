@@ -27,7 +27,7 @@ const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone S
 
 /* ---------- 設定 ---------- */
 // 3.1：新使用者預設「稍後裁切」（立即裁切改成每張都進框選，連拍會變慢）；已經存過設定的老使用者維持原本的值。sound＝拍攝音效
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: true, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, v: 2 };
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: true, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -879,7 +879,7 @@ $('#fileGallery').addEventListener('change', async (e) => {
 
 /* ---------- 即時掃描 ---------- */
 const live = { running: false };
-const STABLE_MS = 500;   // 鎖定後大致不動多久就拍
+const STABLE_MS = 1000;  // 鎖定後大致不動多久就拍（5.1.3：作者覺得 0.5 秒太突然、聚焦圓環來不及顯示，iPhone、Android 都改 1 秒）
 const STABLE_TOL = 0.05;  // 容許的手抖（畫面比例；1.21 從 3% 放寬，作者覺得拿穩了還是拍不下去）
 const EDGE_MARGIN = 0.01; // 紙張四角至少離畫面邊緣 1%（1.4～1.15 是 3%，作者覺得要拿太遠，1.16 放寬）
 async function startLive(docId) {
@@ -1212,9 +1212,15 @@ async function teedLiveRun(v) {
    自動拍攝時框選鎖不到 2 秒、而且畫面拿穩（frameSig 每 0.15 秒比一次，差 > 10 就重數）→ 中央圓環倒數 5、4、3、2、1（每秒嗶一聲）→ 拍下整個畫面
    （和自己按快門一樣：開著自動 AI 框選就交給 AI 框，否則標 ✂ 待裁切）。點相機畫面取消；拍下或取消後，畫面明顯改變（差 > 18，翻頁、換紙）才會再倒數，同一頁不會重拍。
    倒數中原本的偵測或 TEED 鎖到合理的框 → 停止倒數，走正常流程。開著倒數時不顯示 4 秒「直接按快門」提示 */
-const CD_EDGE = 3000, CD_AFTER = 2000, CD_LEN = 5000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
+const CD_LEAVE = 25, CD_LEAVE_N = 3, CD_EDGE = 3000, CD_AFTER = 2000, CD_LEN = 5000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
 const cdOn = () => !!(settings.countdown && settings.autoShutter);
-function cdStop() { live.cdT0 = null; live.cd = null; }
+function cdStop() { live.cdT0 = null; live.cd = null; live.cdAnchor = null; live.cdOut = 0; }
+// 5.1.3：兩張小縮圖的差異，先各自扣掉平均亮度（相機自動曝光造成的整體變亮變暗不算）
+function sigDiffN(a, b) {
+  let ma = 0, mb = 0; for (let i = 0; i < a.length; i++) { ma += a[i]; mb += b[i]; } ma /= a.length; mb /= b.length;
+  let d = 0; for (let i = 0; i < a.length; i++) d += Math.abs(a[i] - ma - (b[i] - mb));
+  return d / a.length;
+}
 function cdTick(v) {
   const now = performance.now();
   if (!cdOn() || !live.running || live.paused || live.capturing || !v.videoWidth) { cdStop(); return; }
@@ -1225,14 +1231,17 @@ function cdTick(v) {
   const diff = live.cdPrev ? sigDiff(sig, live.cdPrev) : 0;
   live.cdPrev = sig;
   if (live.cdT0 != null) {
-    // 5.1.1：倒數已經開始：不再框選、一般晃動不影響；只有大幅移動（翻頁、換位置，和「翻頁後重新倒數」同一標準）才停下，重新等 2 秒
-    if (!live.armed || diff > CD_CHANGE) { cdStop(); live.idleT0 = now; return; }
+    // 5.1.3：倒數已經開始就靠倒數拍完：跟「倒數開始那一刻的畫面」比（扣掉整體亮度，相機自動調亮暗不算），
+    // 差 > 25 連續 3 次（約 0.45 秒）才停（紙被拿走、翻頁、鏡頭轉到別處），重新等 2 秒。
+    // 作者影片：手持 5 秒內與起點最多差約 17；不同場景之間 23～39（5.1.1 是跟上一次比、差 > 18 一次就停，偶爾會被打斷）
+    live.cdOut = live.cdAnchor && sigDiffN(sig, live.cdAnchor) > CD_LEAVE ? (live.cdOut || 0) + 1 : 0;
+    if (!live.armed || live.cdOut >= CD_LEAVE_N) { cdStop(); live.idleT0 = now; return; }
   } else {
     // 5.1.2：框一直卡在「請稍微拉遠一點」超過 3 秒也可以倒數（拍下後交給 AI 框）
     const stuck = live.lockQ && live.edge && live.edgeT0 && now - live.edgeT0 > CD_EDGE;
     const want = live.armed && (stuck || (!live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > CD_AFTER));
     if (!want || diff > CD_MOVE) return; // 開始倒數前要拿穩
-    live.cdT0 = now; live.cdLastN = 6;
+    live.cdT0 = now; live.cdLastN = 6; live.cdAnchor = sig; live.cdOut = 0;
     resetLock(); setRing(0); live.tCand = []; // 5.1.1：開始倒數就暫停框選，畫面上不顯示框
   }
   const el = now - live.cdT0, n = Math.ceil((CD_LEN - el) / 1000);
@@ -4559,7 +4568,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.1.2';
+const APP_VER = '5.1.3';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
