@@ -894,7 +894,7 @@ async function startLive(docId) {
     aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false, camOff: false,
     seenT: performance.now(), idleT0: performance.now(), tipOn: false, // 4.1.7
     teedOK: false, teedBusy: false, teedNext: 0, teedErr: 0, capSrc: null, tT0: null, tCapped: false, tCapSig: null, // 4.3
-    cd: null, cdT0: null, cdBlock: null, cdPrev: null, cdNext: 0, // 5.1
+    cd: null, cdT0: null, cdBlock: null, cdPrev: null, cdNext: 0, cdBase: 0, // 5.1；5.1.4 cdBase
   });
   aiHas([TEED_FILE]).then((ok) => { if (live.running) live.teedOK = ok; }); // 4.3：有 TEED 才有即時後援
   aiErrShown = false; aiTag(aiPend ? 'AI ' + aiPend : '', !!aiPend);
@@ -1166,7 +1166,7 @@ function freeFullCanvases() { live.best = null; for (const c of fullCanvases) c.
    - 跑完一次休息至少和這次一樣久（iPhone 17 約每 0.4 秒、Y31 約每 1.6 秒一次），原本的偵測照常一起找，誰先鎖到聽誰的
    - TEED 鎖到後，這一頁由 TEED 負責到拍完、換頁為止（teedOwns：原本的偵測不參與、也不跑）
    - 連續跑 20 秒沒結果就先停（控制發熱），畫面明顯改變（frameSig 差 > 18）才再開始；只有下載過 AI 資料（有 TEED）的手機才有 */
-const TEED_AFTER = 2000, TEED_CAP = 20000;
+const TEED_AFTER = 1000, TEED_CAP = 20000; // 5.1.4：2 → 1 秒，讓 TEED 在倒數（2 秒）開始前有機會先試
 function teedOwns() { return !!live.teedOK && (live.armed ? live.lockSrc === 'teed' : live.capSrc === 'teed'); }
 function teedWanted(now) {
   if (!live.teedOK || !live.running || !settings.autoShutter || live.paused || live.capturing || live.cd) return false;
@@ -1239,7 +1239,8 @@ function cdTick(v) {
   } else {
     // 5.1.2：框一直卡在「請稍微拉遠一點」超過 3 秒也可以倒數（拍下後交給 AI 框）
     const stuck = live.lockQ && live.edge && live.edgeT0 && now - live.edgeT0 > CD_EDGE;
-    const want = live.armed && (stuck || (!live.lockQ && now - Math.max(live.idleT0 || now, live.seenT || 0) > CD_AFTER));
+    // 5.1.4：從「這一頁開始找」或「上一次真正鎖穩（聚焦過半）」算 2 秒；一閃而過的鎖定（原本的偵測或 TEED）不延後倒數
+    const want = live.armed && (stuck || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > CD_AFTER));
     if (!want || diff > CD_MOVE) return; // 開始倒數前要拿穩
     live.cdT0 = now; live.cdLastN = 6; live.cdAnchor = sig; live.cdOut = 0;
     resetLock(); setRing(0); live.tCand = []; // 5.1.1：開始倒數就暫停框選，畫面上不顯示框
@@ -1391,6 +1392,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   if (live.moveHits >= 2) { live.anchorQ = live.lockQ; live.stableSince = now; live.best = null; live.moveHits = 0; }
   const progress = Math.min(1, (now - live.stableSince) / STABLE_MS);
   live.progress = progress;
+  if (progress >= 0.5) live.cdBase = now; // 5.1.4：真正鎖穩才重新計時倒數
 
   // 紙張太靠近畫面邊緣：照片四周會沒有空間可以重新裁切，先不拍
   // 1.19：只有「一整條邊」貼著畫面的一側（例如書本攤開，旁邊那頁超出畫面）照樣可以拍；兩側以上或只有一個角碰到才擋
@@ -4568,7 +4570,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.1.3';
+const APP_VER = '5.1.4';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
