@@ -76,14 +76,14 @@ async function bench() {
 /* 4.1：AI 精修（Real-ESRGAN animevideov3「線稿」模型，2.5 MB，BSD-3）。app.js 把拉正後的頁面縮小、切成固定大小的塊送來，
    每塊 SR_IN×SR_IN（RGBA）→ 放大 4 倍的 RGBA；接縫由 app.js 多讀邊緣處理。和框選用不同的 session，GPU／CPU 各自選（srEP） */
 const SR_MODEL = new URL('lib/ai/sr-anime.onnx', self.location.href).href;
-let srSess = null, srSessEP = null, srEP = 'wasm';
+let srSess = null, srSessEP = null, srEP = 'wasm', srErr = '';
 async function srCreate(want) { return ort.InferenceSession.create(SR_MODEL, { executionProviders: [want], graphOptimizationLevel: 'all' }); }
 async function srRelease() { if (srSess) { try { await srSess.release(); } catch (_) {} } srSess = null; srSessEP = null; }
 async function srGet() {
   if (srSess && srSessEP === srEP) return srSess;
   await srRelease();
   try { srSess = await srCreate(srEP); srSessEP = srEP; }
-  catch (err) { if (srEP !== 'webgpu') throw err; srEP = 'wasm'; srSess = await srCreate('wasm'); srSessEP = 'wasm'; }
+  catch (err) { if (srEP !== 'webgpu') throw err; srErr = err && err.message ? err.message : String(err); srEP = 'wasm'; srSess = await srCreate('wasm'); srSessEP = 'wasm'; }
   return srSess;
 }
 async function srRun(s, buf, n) {
@@ -99,17 +99,20 @@ async function srRun(s, buf, n) {
 async function srBench(n) {
   const buf = () => new Uint8ClampedArray(n * n * 4).fill(200).buffer;
   await srRelease();
-  let cpu = null, gpu = null, t;
+  let cpu = null, gpu = null, t, why = '';
   const sc = await srCreate('wasm');
   await srRun(sc, buf(), n); t = performance.now(); await srRun(sc, buf(), n); cpu = performance.now() - t;
   try { await sc.release(); } catch (_) {}
+  // 5.1.7：GPU 用不了時記下原因（舊引擎／瀏覽器沒有 WebGPU／拿不到顯示卡／建立或執行出錯）
   let hasGpu = false;
-  try { hasGpu = !!(self.navigator && self.navigator.gpu && (await self.navigator.gpu.requestAdapter())); } catch (_) {}
+  if (engine !== 'new') why = '舊引擎（相容模式）';
+  else if (!(self.navigator && self.navigator.gpu)) why = '這個環境沒有 WebGPU';
+  else { try { hasGpu = !!(await self.navigator.gpu.requestAdapter()); if (!hasGpu) why = '拿不到 GPU'; } catch (err) { why = '拿不到 GPU：' + (err && err.message ? err.message : err); } }
   if (engine === 'new' && hasGpu) {
     try { const sg = await srCreate('webgpu'); await srRun(sg, buf(), n); t = performance.now(); await srRun(sg, buf(), n); gpu = performance.now() - t; try { await sg.release(); } catch (_) {} }
-    catch (_) { gpu = null; }
+    catch (err) { gpu = null; why = 'GPU 出錯：' + (err && err.message ? err.message : err); }
   }
-  return { cpu, gpu };
+  return { cpu, gpu, why: why.slice(0, 80) };
 }
 
 /* 4.2：TEED 邊緣模型（MIT，0.25 MB）。app.js 送來照片縮小後的 RGBA（長邊 640、寬高為 8 的倍數），
@@ -144,13 +147,14 @@ self.onmessage = async (e) => {
     if (type === 'bench') { self.postMessage({ id, ok: true, result: await bench() }); return; }
     if (type === 'setEP') { ep = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: ep }); return; }
     if (type === 'srBench') { self.postMessage({ id, ok: true, result: await srBench(e.data.n) }); return; }
-    if (type === 'srEP') { srEP = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: srEP }); return; }
+    if (type === 'srEP') { srErr = ''; srEP = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: srEP }); return; }
     if (type === 'srTile') {
       let r;
       try { r = await srRun(await srGet(), e.data.buffer, e.data.n); }
-      catch (err) { if (srSessEP !== 'webgpu') throw err; srEP = 'wasm'; r = await srRun(await srGet(), e.data.buffer, e.data.n); } // GPU 出錯改用 CPU（buffer 還在：送進來的是複本）
+      catch (err) { if (srSessEP !== 'webgpu') throw err; srErr = err && err.message ? err.message : String(err); srEP = 'wasm'; r = await srRun(await srGet(), e.data.buffer, e.data.n); } // GPU 出錯改用 CPU（buffer 還在：送進來的是複本）
       self.postMessage({ id, ok: true, result: r }, [r]); return;
     }
+    if (type === 'srState') { self.postMessage({ id, ok: true, result: { ep: srSessEP || srEP, err: srErr } }); return; } // 5.1.7
     if (type === 'srRelease') { await srRelease(); self.postMessage({ id, ok: true, result: null }); return; }
     if (type === 'teed') { // 4.3：即時掃描與框選可能同時送來，排隊一個一個跑（同一個 session 不能同時跑）
       const job = teedQ.then(() => teedRun(e.data.buffer, e.data.width, e.data.height)); teedQ = job.catch(() => {});

@@ -3928,7 +3928,7 @@ $('#btnSettings').onclick = () => {
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成金色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
-    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}">${srInfoText()}</div>
+    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速 AI 精修</span></button></div>
     <div class="note" id="setVer" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     // 5.0：連點版本號碼 5 次，顯示／隱藏「顯示 TEED 協助標記」開關（隱藏時一併關掉標記）
     let verTaps = 0, verT = 0;
@@ -3943,6 +3943,10 @@ $('#btnSettings').onclick = () => {
       s.querySelector('#srInfo').style.display = settings.teedMarkShown ? '' : 'none'; // 5.1.6
       row.querySelector('.tg').classList.toggle('on', !!settings.teedMark);
       toast(settings.teedMarkShown ? '已顯示「TEED 協助標記」開關' : '已隱藏「TEED 協助標記」開關');
+    };
+    s.querySelector('#srRebench').onclick = async () => { // 5.1.7：隱藏區手動重測
+      try { if (!(await srEnsureModel())) return; await srBenchNow(true); } catch (e) { toast('測速失敗：' + (e && e.message ? e.message : e)); }
+      const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
     };
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
     // 3.0：還在用舊 AI 引擎的人（按過「暫時不要」或還沒被問）才顯示，升級後消失（3.0.1 搬到自動 AI 框選開關下方）
@@ -4161,9 +4165,22 @@ async function aiState() {
   return { model, neu, old };
 }
 // 能用 AI 的引擎：新引擎（沒被安全網停用）優先，其次舊引擎
-function aiPickEngine(st) { return st.neu && !settings.aiForceOld ? 'new' : st.old ? 'old' : st.neu ? 'new' : null; }
+function aiPickEngine(st) { return st.neu && !aiOldNow ? 'new' : st.old ? 'old' : st.neu ? 'new' : null; }
+/* 5.1.7：AI 的「退一步」都只算暫時，之後自動再試（作者：不希望正式版使用者被永久卡在慢速；測試版 iPhone 17 精修一頁超過 1 分鐘、GPU 無法使用，
+   正式版同一支手機不到 20 秒）。原本三個永久降級：
+   (1) 新引擎載入失敗一次 → settings.aiForceOld 永久用舊引擎（沒有 GPU）→ 改成 aiOldNow 只在這次打開期間；舊的 aiForceOld 啟動時清掉、記一筆
+   (2) 精修測速只測一次 → 測到 CPU（GPU 無法使用或比較慢）就每次打開第一次精修重測，連續 3 次（SR_RETRY）才定案；精修途中 GPU 出錯改用 CPU 的那次不算進速度
+   (3) 框選閃退保護一次就永久 CPU → 第一次只在這次打開期間用 CPU（aiSafeNow），下次再試 GPU；第二次（settings.aiCrashN ≥ 2）才永久；GPU 批次框選順利做完就歸零
+   設定最下方隱藏區（連點版號 5 次）顯示引擎、GPU 狀態、原因與最近紀錄（settings.aiLog，保留 8 筆），並有「重新測速」按鈕 */
+let aiOldNow = false, aiSafeNow = false, aiEPNow = null, srBenchedNow = false;
+function aiNote(t) {
+  const d = new Date(), z = (n) => String(n).padStart(2, '0');
+  settings.aiLog = [`${d.getMonth() + 1}/${d.getDate()} ${z(d.getHours())}:${z(d.getMinutes())} ${t}`, ...(settings.aiLog || [])].slice(0, 8); saveSettings();
+}
+if (settings.aiForceOld) { settings.aiForceOld = false; saveSettings(); aiNote('啟動時是相容模式（舊引擎），改試新引擎'); }
+if (settings.aiSafeCPU && settings.aiCrashN == null) { settings.aiSafeCPU = false; settings.aiCrashN = 1; settings.aiBenchV = null; saveSettings(); aiNote('框選閃退保護（舊版一次就永久 CPU）改回可試 GPU'); }
 async function aiCached() { const st = await aiState(); return st.model && !!aiPickEngine(st); }
-const aiUpgradable = (st) => st.model && st.old && !st.neu && !settings.aiForceOld;
+const aiUpgradable = (st) => st.model && st.old && !st.neu && !aiOldNow;
 function aiReset() {
   if (aiWorker) aiWorker.terminate();
   for (const p of aiPending.values()) p.rej(new Error('AI 重新載入'));
@@ -4187,11 +4204,15 @@ const AI_BATCH_KEY = 'cocoscan-aibatch';
 function aiBatchMark(on) {
   aiBatchOn = on;
   try { if (on) localStorage.setItem(AI_BATCH_KEY, String(Date.now())); else localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
+  if (!on && aiEPNow === 'webgpu' && settings.aiCrashN) { settings.aiCrashN = 0; saveSettings(); } // 5.1.7：GPU 順利做完一批，閃退次數歸零
 }
 function aiCrashCheck() {
   let was = null; try { was = localStorage.getItem(AI_BATCH_KEY); localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
   if (!was) return;
-  settings.aiEP = 'wasm'; settings.aiSafeCPU = true; saveSettings();
+  settings.aiCrashN = (settings.aiCrashN || 0) + 1; aiSafeNow = true; // 5.1.7：這次打開期間先用 CPU
+  if (settings.aiCrashN >= 2) { settings.aiEP = 'wasm'; settings.aiSafeCPU = true; aiNote('框選又中斷（第 2 次），之後一律用 CPU'); }
+  else aiNote('框選中斷（第 1 次），這次先用 CPU，下次打開再試 GPU');
+  saveSettings();
   setTimeout(() => toast('上次 AI 框選中斷，已改用較省記憶體的方式'), 1500);
 }
 aiCrashCheck();
@@ -4207,8 +4228,8 @@ function aiInit() {
     aiWorker = new Worker('ai-worker.js');
     aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
     aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error('ENGINE:' + (e.message || 'AI 載入失敗'))); aiPending.clear(); aiWorker = null; aiInitP = null; };
-    await aiPost({ type: 'init', engine: eng, ep: settings.aiEP || 'wasm' });
-    aiEngineNow = eng;
+    const r0 = await aiPost({ type: 'init', engine: eng, ep: aiSafeNow ? 'wasm' : settings.aiEP || 'wasm' });
+    aiEngineNow = eng; aiEPNow = r0 && r0.ep;
     // 新引擎還沒比較過 CPU／GPU（例如剛下載完、或新版第一次用）：在背景比較一次
     if (eng === 'new' && settings.aiBenchV !== AI_NEW_VER) aiBench();
   })();
@@ -4221,7 +4242,7 @@ async function aiBench() {
     settings.aiEP = !settings.aiSafeCPU && r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm'; // 4.2.1：閃退保護改過 CPU 就不再改回 GPU
     settings.aiBenchV = AI_NEW_VER; saveSettings();
     console.info('AI bench', r, settings.aiEP);
-    await aiPost({ type: 'setEP', ep: settings.aiEP });
+    aiEPNow = await aiPost({ type: 'setEP', ep: aiSafeNow ? 'wasm' : settings.aiEP }); // 5.1.7：閃退保護第一次只影響這次打開
   } catch (e) { console.warn('AI bench', e); }
 }
 // 送一個工作給 AI；新引擎載入失敗（ENGINE:）時啟動安全網：改用舊引擎再試一次
@@ -4234,7 +4255,7 @@ async function aiCall(payload, transfer, retried) {
     const m = String(e && e.message);
     if (retried || !m.startsWith('ENGINE:') || aiEngineNow === 'old') throw new Error(m.replace(/^ENGINE:/, ''));
     console.warn('AI 新引擎載入失敗，改用舊引擎', m);
-    settings.aiForceOld = true; saveSettings(); aiReset();
+    aiOldNow = true; aiReset(); aiNote('新引擎載入失敗，這次改用相容模式：' + m.replace(/^ENGINE:/, '').slice(0, 60)); // 5.1.7：只在這次打開期間
     if (!(await aiHas(AI_OLD)) && !(await aiDownload(AI_OLD, 'AI 改用相容模式，下載中…'))) throw new Error('無法載入 AI 引擎');
     return aiCall(keep ? Object.assign({}, payload, { buffer: keep }) : payload, keep ? [keep] : [], true);
   }
@@ -4276,14 +4297,14 @@ async function aiEnsure(inApp, noAsk, what) {
   const st = await aiState();
   const need = [...(st.model ? [] : [AI_MODEL]), ...AI_NEW, ...((await aiHas([TEED_FILE])) ? [] : [TEED_FILE])];
   if (!(await aiDownload(need, '下載 AI 資料中…'))) return false;
-  settings.aiForceOld = false; settings.aiBenchV = null; saveSettings();
+  aiOldNow = false; settings.aiBenchV = null; saveSettings();
   await aiDropOld(); aiReset();
   return true;
 }
 // 舊使用者升級成新引擎（拍攝畫面的詢問、設定裡的按鈕）
 async function aiUpgrade() {
   if (!(await aiDownload(AI_NEW, '升級 AI 引擎中…'))) return false;
-  settings.aiForceOld = false; settings.aiBenchV = null; settings.aiUpAsked = true; saveSettings();
+  aiOldNow = false; settings.aiBenchV = null; settings.aiUpAsked = true; saveSettings();
   await aiDropOld(); aiReset();
   aiInit().catch(() => {}); // 載入新引擎並在背景比較 CPU／GPU
   return true;
@@ -4465,20 +4486,34 @@ async function srEnsureModel() {
 }
 /* 5.1.6：測速結果改版 v2，舊的（v1）作廢重測一次。測試版 iPhone 曾被記成 CPU（可能測的時候 GPU 被框選佔著），之後永遠用 CPU，
    一頁超過 1 分鐘（正式版同一支手機重測後用 GPU，約 20 秒內）。測之前先把 AI 引擎整個重開，讓 GPU 乾淨 */
-const SR_BENCH_V = 2;
+const SR_BENCH_V = 2, SR_RETRY = 3;
+const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+// 5.1.7：隱藏區的 AI 診斷（引擎、GPU 狀態與原因、精修速度、框選、最近紀錄）
 function srInfoText() {
-  const b = settings.srBench;
-  return b && b.v === SR_BENCH_V && b.ms > 0 ? `AI 精修：${b.ep === 'webgpu' ? 'GPU' : 'CPU'}，每塊約 ${b.ms} 毫秒` + (b.cpu ? `（測速 CPU ${b.cpu}${b.gpu ? `、GPU ${b.gpu}` : '、GPU 無法使用'}）` : '') : 'AI 精修：尚未測速（下次精修時測）';
+  const b = settings.srBench, L = settings.srLast, out = [];
+  out.push(`AI 引擎：${aiEngineNow ? (aiEngineNow === 'new' ? '新引擎' : '舊引擎（相容模式）') + `，框選用 ${aiEPNow === 'webgpu' ? 'GPU' : 'CPU'}` : aiOldNow ? '這次用相容模式（尚未載入）' : '尚未載入'}`);
+  out.push(`框選：${settings.aiSafeCPU ? '閃退保護，一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}`);
+  if (b && b.v === SR_BENCH_V && b.ms > 0) {
+    const why = b.gpu != null ? `GPU ${b.gpu}` : `GPU 無法使用${b.gpuWhy ? '：' + b.gpuWhy : ''}`;
+    out.push(`精修：${b.ep === 'webgpu' ? 'GPU' : 'CPU'}，每塊約 ${b.ms} 毫秒（測速 CPU ${b.cpu}、${why}${b.ep === 'wasm' ? `；第 ${b.n || 1} 次，${(b.n || 1) >= SR_RETRY ? '已定案' : '下次打開再測'}` : ''}）`);
+  } else out.push('精修：尚未測速（下次精修時測）');
+  if (L) out.push(`上次精修：${L.ep === 'webgpu' ? 'GPU' : 'CPU'}，每塊 ${L.per} 毫秒${L.fell ? `（途中 GPU 出錯改 CPU：${L.err || ''}）` : ''}`);
+  for (const t of settings.aiLog || []) out.push('・' + t);
+  return out.map(esc).join('<br>');
 }
-async function srBenchNow() {
+async function srBenchNow(force) {
   const b = settings.srBench;
-  if (b && b.v === SR_BENCH_V && b.ms > 0) return b;
+  // 5.1.7：GPU 的結果沿用；CPU 的結果每次打開第一次精修重測，連續 SR_RETRY 次才定案
+  if (!force && b && b.v === SR_BENCH_V && b.ms > 0 && (b.ep === 'webgpu' || (b.n || 1) >= SR_RETRY || srBenchedNow)) return b;
   busy('正在測試這支手機的速度…');
   try {
     if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset(); // 5.1.6：重開 AI 引擎，框選、TEED 的記憶體都清掉再測
     const r = await aiCall({ type: 'srBench', n: SR_IN });
     const ep = r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm';
-    settings.srBench = { v: SR_BENCH_V, ep, ms: Math.round(ep === 'webgpu' ? r.gpu : r.cpu), cpu: Math.round(r.cpu), gpu: r.gpu != null ? Math.round(r.gpu) : null };
+    const n = ep === 'webgpu' || force ? 1 : b && b.v === SR_BENCH_V && b.ep === 'wasm' ? (b.n || 1) + 1 : 1;
+    srBenchedNow = true;
+    settings.srBench = { v: SR_BENCH_V, ep, ms: Math.round(ep === 'webgpu' ? r.gpu : r.cpu), cpu: Math.round(r.cpu), gpu: r.gpu != null ? Math.round(r.gpu) : null, gpuWhy: r.why || '', n };
+    if (b && b.v === SR_BENCH_V && b.ep !== ep) aiNote(`精修重新測速：${b.ep === 'webgpu' ? 'GPU' : 'CPU'} → ${ep === 'webgpu' ? 'GPU' : 'CPU'}${r.why ? '（' + r.why + '）' : ''}`);
     saveSettings(); console.info('SR bench', r, settings.srBench);
     return settings.srBench;
   } finally { unbusy(); }
@@ -4536,7 +4571,13 @@ async function srRun(page) {
     }
     // 實際每塊時間（指數平均），下次預估更準
     const per = (performance.now() - t0) / total, b = settings.srBench;
-    if (b && b.v === SR_BENCH_V) { b.ms = Math.round(b.ms * 0.5 + per * 0.5); saveSettings(); }
+    // 5.1.7：問 worker 這次實際用什麼跑；GPU 途中出錯改 CPU 的那次不算進速度（免得以為手機變慢、改用小尺寸）
+    let st = null; try { st = await aiCall({ type: 'srState' }); } catch (_) {}
+    const used = st ? st.ep : b && b.ep, fell = !!(b && b.ep === 'webgpu' && used !== 'webgpu');
+    settings.srLast = { ep: used, per: Math.round(per), fell, err: fell && st ? String(st.err || '').slice(0, 60) : '' };
+    if (fell) aiNote('精修途中 GPU 出錯，這頁改用 CPU' + (st && st.err ? '：' + String(st.err).slice(0, 60) : ''));
+    if (b && b.v === SR_BENCH_V && !fell) b.ms = Math.round(b.ms * 0.5 + per * 0.5);
+    saveSettings();
     return { blob: await toBlob(out, 'image/jpeg', 0.95), box, side };
   } finally {
     small.width = small.height = 0; out.width = out.height = 0; tmp.width = tmp.height = 0;
@@ -4591,7 +4632,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.1.6';
+const APP_VER = '5.1.7';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
