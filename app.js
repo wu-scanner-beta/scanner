@@ -3928,6 +3928,7 @@ $('#btnSettings').onclick = () => {
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成金色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
+    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}">${srInfoText()}</div>
     <div class="note" id="setVer" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     // 5.0：連點版本號碼 5 次，顯示／隱藏「顯示 TEED 協助標記」開關（隱藏時一併關掉標記）
     let verTaps = 0, verT = 0;
@@ -3939,6 +3940,7 @@ $('#btnSettings').onclick = () => {
       if (!settings.teedMarkShown) settings.teedMark = false;
       saveSettings();
       const row = s.querySelector('#teedMarkRow'); row.style.display = settings.teedMarkShown ? '' : 'none';
+      s.querySelector('#srInfo').style.display = settings.teedMarkShown ? '' : 'none'; // 5.1.6
       row.querySelector('.tg').classList.toggle('on', !!settings.teedMark);
       toast(settings.teedMarkShown ? '已顯示「TEED 協助標記」開關' : '已隱藏「TEED 協助標記」開關');
     };
@@ -4461,14 +4463,22 @@ async function srEnsureModel() {
   if (await aiHas([SR_FILE])) return true;
   return aiDownload([SR_FILE], '下載 AI 精修資料中…');
 }
+/* 5.1.6：測速結果改版 v2，舊的（v1）作廢重測一次。測試版 iPhone 曾被記成 CPU（可能測的時候 GPU 被框選佔著），之後永遠用 CPU，
+   一頁超過 1 分鐘（正式版同一支手機重測後用 GPU，約 20 秒內）。測之前先把 AI 引擎整個重開，讓 GPU 乾淨 */
+const SR_BENCH_V = 2;
+function srInfoText() {
+  const b = settings.srBench;
+  return b && b.v === SR_BENCH_V && b.ms > 0 ? `AI 精修：${b.ep === 'webgpu' ? 'GPU' : 'CPU'}，每塊約 ${b.ms} 毫秒` + (b.cpu ? `（測速 CPU ${b.cpu}${b.gpu ? `、GPU ${b.gpu}` : '、GPU 無法使用'}）` : '') : 'AI 精修：尚未測速（下次精修時測）';
+}
 async function srBenchNow() {
   const b = settings.srBench;
-  if (b && b.v === 1 && b.ms > 0) return b;
+  if (b && b.v === SR_BENCH_V && b.ms > 0) return b;
   busy('正在測試這支手機的速度…');
   try {
+    if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset(); // 5.1.6：重開 AI 引擎，框選、TEED 的記憶體都清掉再測
     const r = await aiCall({ type: 'srBench', n: SR_IN });
     const ep = r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm';
-    settings.srBench = { v: 1, ep, ms: Math.round(ep === 'webgpu' ? r.gpu : r.cpu) };
+    settings.srBench = { v: SR_BENCH_V, ep, ms: Math.round(ep === 'webgpu' ? r.gpu : r.cpu), cpu: Math.round(r.cpu), gpu: r.gpu != null ? Math.round(r.gpu) : null };
     saveSettings(); console.info('SR bench', r, settings.srBench);
     return settings.srBench;
   } finally { unbusy(); }
@@ -4526,7 +4536,7 @@ async function srRun(page) {
     }
     // 實際每塊時間（指數平均），下次預估更準
     const per = (performance.now() - t0) / total, b = settings.srBench;
-    if (b && b.v === 1) { b.ms = Math.round(b.ms * 0.5 + per * 0.5); saveSettings(); }
+    if (b && b.v === SR_BENCH_V) { b.ms = Math.round(b.ms * 0.5 + per * 0.5); saveSettings(); }
     return { blob: await toBlob(out, 'image/jpeg', 0.95), box, side };
   } finally {
     small.width = small.height = 0; out.width = out.height = 0; tmp.width = tmp.height = 0;
@@ -4581,7 +4591,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.1.5';
+const APP_VER = '5.1.6';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
