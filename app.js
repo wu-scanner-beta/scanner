@@ -1209,12 +1209,12 @@ async function teedLiveRun(v) {
   onDetect(r, sig, full, sharp, gt, 'teed');
 }
 /* ---------- 5.1 倒數拍攝（5.1.1：開始倒數後就暫停框選，一般晃動不影響，只有大幅移動才停；設定 countdown，預設關；拍攝畫面 AI 按鈕右邊的碼錶按鈕，手動拍攝時隱藏） ----------
-   自動拍攝時框選鎖不到 2 秒、而且畫面拿穩（frameSig 每 0.15 秒比一次，差 > 10 就重數）→ 中央圓環倒數 5、4、3、2、1（每秒嗶一聲）→ 拍下整個畫面
+   自動拍攝時框選鎖不到 2 秒、而且畫面拿穩（5.1.5 起要連續 1 秒）→ 中央圓環倒數（5.1.5 起 3、2、1，原本 5 秒；每秒嗶一聲）→ 拍下整個畫面
    （和自己按快門一樣：開著自動 AI 框選就交給 AI 框，否則標 ✂ 待裁切）。點相機畫面取消；拍下或取消後，畫面明顯改變（差 > 18，翻頁、換紙）才會再倒數，同一頁不會重拍。
    倒數中原本的偵測或 TEED 鎖到合理的框 → 停止倒數，走正常流程。開著倒數時不顯示 4 秒「直接按快門」提示 */
-const CD_LEAVE = 25, CD_LEAVE_N = 3, CD_EDGE = 3000, CD_AFTER = 2000, CD_LEN = 5000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
+const CD_STILL = 10, CD_STILL_LOOSE = 20, CD_LOOSE_AFTER = 5000, CD_WAIT = '拿穩後開始倒數', CD_LEAVE = 25, CD_LEAVE_N = 3, CD_EDGE = 3000, CD_AFTER = 2000, CD_LEN = 3000, CD_MOVE = 10, CD_CHANGE = 18, CD_HINT = '倒數拍攝中，點畫面可取消';
 const cdOn = () => !!(settings.countdown && settings.autoShutter);
-function cdStop() { live.cdT0 = null; live.cd = null; live.cdAnchor = null; live.cdOut = 0; }
+function cdStop() { live.cdT0 = null; live.cd = null; live.cdAnchor = null; live.cdOut = 0; live.cdWait = false; }
 // 5.1.3：兩張小縮圖的差異，先各自扣掉平均亮度（相機自動曝光造成的整體變亮變暗不算）
 function sigDiffN(a, b) {
   let ma = 0, mb = 0; for (let i = 0; i < a.length; i++) { ma += a[i]; mb += b[i]; } ma /= a.length; mb /= b.length;
@@ -1237,16 +1237,25 @@ function cdTick(v) {
     live.cdOut = live.cdAnchor && sigDiffN(sig, live.cdAnchor) > CD_LEAVE ? (live.cdOut || 0) + 1 : 0;
     if (!live.armed || live.cdOut >= CD_LEAVE_N) { cdStop(); live.idleT0 = now; return; }
   } else {
+    // 5.1.5：要「連續 1 秒都拿穩」才開始倒數（作者：放好紙時倒數早就在跑了）：現在的畫面和最近 1 秒內每一次取樣比（扣亮度），都 ≤ 10；
+    // 鎖不到超過 5 秒還沒開始就放寬到 20。作者影片：手持跟 1 秒前比，門檻 10 時 96% 的時間算穩定（含刻意移動、翻頁）
+    live.cdHist = (live.cdHist || []).filter((h) => now - h.t <= 1400); live.cdHist.push({ t: now, sig }); // 鎖不到時拍攝迴圈約 0.2 秒一圈，留 1.4 秒內的取樣，最舊的要超過 0.9 秒
+    const idle = now - Math.max(live.idleT0 || now, live.cdBase || 0);
+    const tol = idle > CD_LOOSE_AFTER ? CD_STILL_LOOSE : CD_STILL;
+    const still = live.cdHist[0].t <= now - 900 && live.cdHist.every((h) => sigDiffN(sig, h.sig) <= tol);
     // 5.1.2：框一直卡在「請稍微拉遠一點」超過 3 秒也可以倒數（拍下後交給 AI 框）
     const stuck = live.lockQ && live.edge && live.edgeT0 && now - live.edgeT0 > CD_EDGE;
     // 5.1.4：從「這一頁開始找」或「上一次真正鎖穩（聚焦過半）」算 2 秒；一閃而過的鎖定（原本的偵測或 TEED）不延後倒數
     const want = live.armed && (stuck || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > CD_AFTER));
-    if (!want || diff > CD_MOVE) return; // 開始倒數前要拿穩
-    live.cdT0 = now; live.cdLastN = 6; live.cdAnchor = sig; live.cdOut = 0;
+    live.cdWait = want && !still; // 等使用者拿穩：提示「拿穩後開始倒數」
+    if (!want || !still) return;
+    live.cdWait = false; live.cdHist = [];
+    live.cdT0 = now; live.cdLastN = Math.ceil(CD_LEN / 1000) + 1; live.cdAnchor = sig; live.cdOut = 0;
     resetLock(); setRing(0); live.tCand = []; // 5.1.1：開始倒數就暫停框選，畫面上不顯示框
   }
   const el = now - live.cdT0, n = Math.ceil((CD_LEN - el) / 1000);
   live.cd = true;
+  setHint(CD_HINT); // 5.1.5：倒數中不偵測，提示要在這裡設
   if (n >= 1 && n < live.cdLastN) { live.cdLastN = n; sfxPlay('tick'); }
   if (el >= CD_LEN) { cdStop(); capture(sig, null, null, true); }
 }
@@ -1348,7 +1357,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
   if (!ok) {
     if (tq) { live.tCand = []; if (live.lockQ) { if (++live.miss >= 2) resetLock(); } }
     else { live.miss++; live.cand = []; if (live.miss >= 4 && live.lockQ) resetLock(); }
-    if (!live.lockQ) { setRing(0); setHint(live.cd ? CD_HINT : live.tipOn ? waitTip() : live.count ? '放入下一頁' : '將文件放進畫面中'); }
+    if (!live.lockQ) { setRing(0); setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : live.count ? '放入下一頁' : '將文件放進畫面中'); }
     return;
   }
   live.miss = 0;
@@ -1360,7 +1369,7 @@ function onDetect(r, sig, full, sharp, gt, src) {
     const C = tq ? 'tCand' : 'cand', need = tq ? 2 : 3;
     if (live[C].length && maxDisp(q, live[C][live[C].length - 1]) > 0.05) live[C] = [];
     live[C].push(q);
-    if (live[C].length < need) { setHint(live.cd ? CD_HINT : live.tipOn ? waitTip() : '尋找文件中…'); return; }
+    if (live[C].length < need) { setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : '尋找文件中…'); return; }
     live.lockQ = medianQuad(live[C]);
     live.acc = live[C].slice();
     live.cand = []; live.tCand = []; live.lockSrc = src; live.tT0 = null;
@@ -1400,14 +1409,14 @@ function onDetect(r, sig, full, sharp, gt, src) {
   if (live.edge) { if (!live.edgeT0) live.edgeT0 = now; } else live.edgeT0 = 0; // 5.1.2：卡在「拉遠一點」多久
   if (live.edge) {
     live.stableSince = now; live.progress = 0; live.best = null;
-    setRing(0); setHint(live.cd ? CD_HINT : live.tipOn ? waitTip() : '請稍微拉遠一點'); return;
+    setRing(0); setHint(live.cd ? CD_HINT : live.cdWait ? CD_WAIT : live.tipOn ? waitTip() : '請稍微拉遠一點'); return;
   }
 
   // 記錄倒數期間最清楚的一格
   if (full && (!live.best || sharp > live.best.sharp)) live.best = { canvas: full, sharp, quad: q.map((p) => p.slice()) };
 
   if (!settings.autoShutter) { setRing(0); setHint('按下快門拍攝', true); return; }
-  setRing(progress);
+  if (progress <= 0) setRing(0); // 5.1.5：進度圈改由 drawOverlay 照時間畫
   if (live.tipOn && progress < 0.05) { setHint(waitTip()); } else { live.tipOn = false; setHint('對準了，保持住…', true); }
   if (progress >= 1 && Date.now() - live.lastCapT > 800) {
     const b = live.best;
@@ -1484,7 +1493,9 @@ function drawOverlay() {
   } else { live.shown = null; live.fade = 0; }
   if (live.shown) {
     const pts = live.shown.map((p) => [R.x + p[0] * R.w, R.y + p[1] * R.h]);
-    const pr = settings.autoShutter ? live.progress : 1;
+    // 5.1.5：進度照時間算（每次重畫都算，約每秒 60 次），不再跟著偵測結果一格一格跳；不穩時 stableSince 會被重設，圓環就退回去
+    const pr = settings.autoShutter ? (live.progress > 0 && live.stableSince ? Math.min(1, (performance.now() - live.stableSince) / STABLE_MS) : 0) : 1;
+    if (settings.autoShutter && live.armed && live.lockQ && !live.edge) setRing(pr); // 快門鈕外圈也一起
     ctx.globalAlpha = live.fade;
     ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
     // 綠色隨倒數逐漸變濃
@@ -1871,7 +1882,7 @@ $('#liveClose').onclick = () => finishLive();
 $('#cdBtn').onclick = () => {
   sfxPrime();
   settings.countdown = !settings.countdown; saveSettings(); cdStop(); updateLiveBtns();
-  liveTip('倒數拍攝', settings.countdown ? '偵測不到框選範圍時<br>倒數 5 秒自動拍下（點畫面可取消）' : '已關閉倒數拍攝');
+  liveTip('倒數拍攝', settings.countdown ? '偵測不到框選範圍時<br>拿穩後倒數 3 秒自動拍下（點畫面可取消）' : '已關閉倒數拍攝');
 };
 // 5.1：倒數中點相機畫面取消，這一頁不再倒數，畫面明顯改變後才重新開始
 $('#live .stage').addEventListener('click', (e) => {
@@ -3899,7 +3910,7 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>即時掃描自動拍攝<small>文件穩定約 1 秒後自動按快門</small></span><button class="tg ${settings.autoShutter ? 'on' : ''}" data-k="autoShutter"></button></div>
     <div class="switch"><span>拍照後先確認裁切<small>高畫質拍照後進入四角微調畫面</small></span><button class="tg ${settings.confirmCrop ? 'on' : ''}" data-k="confirmCrop"></button></div>
     <div class="switch"><span>✨ 自動 AI 框選<small id="aiStat">即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選紙張</small></span><button class="tg ${settings.autoAI ? 'on' : ''}" id="setAuto"></button></div>
-    <div class="switch"><span>倒數拍攝<small>即時掃描偵測不到框選範圍時，倒數 5 秒自動拍下（只在自動拍攝時）</small></span><button class="tg ${settings.countdown ? 'on' : ''}" data-k="countdown"></button></div>
+    <div class="switch"><span>倒數拍攝<small>即時掃描偵測不到框選範圍時，拿穩後倒數 3 秒自動拍下（只在自動拍攝時）</small></span><button class="tg ${settings.countdown ? 'on' : ''}" data-k="countdown"></button></div>
     <div class="switch"><span>拍攝動畫<small id="animNote">即時掃描拍下時的攤平、掃描光動畫；手機較舊覺得卡可以關掉</small></span><button class="tg ${animPref() ? 'on' : ''}" id="setAnim"></button></div>
     <div class="switch"><span>拍攝音效<small>快門聲與掃描音效，跟著手機音量（iPhone 開靜音時不會響）</small></span><button class="tg ${settings.sound !== false ? 'on' : ''}" data-k="sound"></button></div>
     <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
@@ -4570,7 +4581,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.1.4';
+const APP_VER = '5.1.5';
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4610,7 +4621,7 @@ const CHANGELOG = [
     { t: '偵測不到框選範圍時，將提示直接按快門', since: '4.2' },
     { t: '淺色背景即時掃描時，也能自動找到框選範圍', since: '4.3' },
     { t: '提升 AI 框選穩定性，減少一次處理多張時閃退', since: '5.0' },
-    { t: '新增倒數拍攝按鈕：當偵測不到框選範圍時，將自動倒數 5 秒拍下', since: '5.1' },
+    { t: '新增倒數拍攝按鈕：當偵測不到框選範圍時，將自動倒數 3 秒拍下', since: '5.1' },
     { t: '加入拍攝聚焦動畫，框到後更有預備感', since: '5.1' },
   ] },
 ];
