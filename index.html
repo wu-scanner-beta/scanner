@@ -522,6 +522,8 @@ input[type=file]{display:none}
 .log-item ul{margin:0;padding-left:20px}
 .log-item li{font-size:14px;line-height:1.75;color:var(--text)}
 .log-current{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;font-weight:700;color:var(--cocoa)!important;text-align:center;margin:12px 0 6px!important}
+/* 5.1.9：連點 5 下切換測試資訊，不要選到文字、不要雙擊放大 */
+.log-current{-webkit-user-select:none;user-select:none;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 
 /* 1.19 即時掃描：閃光燈圖示、裁切方式、提示；待裁切標記 */
 #live .ibtn.round{width:36px;height:36px;border-radius:50%;color:#fff;background:rgba(28,19,14,.6);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}

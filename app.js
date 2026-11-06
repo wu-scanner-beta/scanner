@@ -1,5 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
+const APP_VER = '5.1.9'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -556,6 +557,8 @@ async function renderHome() {
   inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') inp.blur(); });
   updateHomeStrip(pages);
   $('#recentOpen').onclick = () => openDoc(doc.id);
+  // 5.1.9：點卡片空白處也開啟文件（名稱、縮圖、按鈕維持原本功能）
+  body.querySelector('.recent').onclick = (e) => { if (!e.target.closest('input, label, button')) openDoc(doc.id); };
   $('#recentPdf').onclick = () => { state.docId = doc.id; openPdfSheet(); };
   $('#allDocs').onclick = () => { renderLibrary(); go('library'); };
 }
@@ -3928,25 +3931,23 @@ $('#btnSettings').onclick = () => {
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成金色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
-    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速 AI 精修</span></button></div>
+    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速（精修與框選）</span></button><button class="srow" id="aiUnsafe" style="${settings.aiSafeCPU || settings.aiCrashN ? '' : 'display:none'}"><span>解除框選閃退保護</span></button></div>
     <div class="note" id="setVer" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
-    // 5.0：連點版本號碼 5 次，顯示／隱藏「顯示 TEED 協助標記」開關（隱藏時一併關掉標記）
-    let verTaps = 0, verT = 0;
-    s.querySelector('#setVer').onclick = () => {
-      clearTimeout(verT); verT = setTimeout(() => { verTaps = 0; }, 1500);
-      if (++verTaps < 5) return;
-      verTaps = 0;
-      settings.teedMarkShown = !settings.teedMarkShown;
-      if (!settings.teedMarkShown) settings.teedMark = false;
-      saveSettings();
-      const row = s.querySelector('#teedMarkRow'); row.style.display = settings.teedMarkShown ? '' : 'none';
-      s.querySelector('#srInfo').style.display = settings.teedMarkShown ? '' : 'none'; // 5.1.6
-      row.querySelector('.tg').classList.toggle('on', !!settings.teedMark);
-      toast(settings.teedMarkShown ? '已顯示「TEED 協助標記」開關' : '已隱藏「TEED 協助標記」開關');
-    };
-    s.querySelector('#srRebench').onclick = async () => { // 5.1.7：隱藏區手動重測
-      try { if (!(await srEnsureModel())) return; await srBenchNow(true); } catch (e) { toast('測速失敗：' + (e && e.message ? e.message : e)); }
+    // 5.0：隱藏區（TEED 協助標記開關、AI 診斷）。5.1.9 起入口改在更新日誌的「目前版本」連點 5 下（logCurrent），這裡不再能點
+    s.querySelector('#srRebench').onclick = async () => { // 5.1.7：隱藏區手動重測；5.1.9 精修與框選一起
+      try {
+        if (!(await srEnsureModel())) return;
+        settings.aiBenchV = null; settings.aiBenchN = 0; aiBenchedNow = false; saveSettings();
+        await srBenchNow(true); await aiInit(); await aiBench();
+      } catch (e) { toast('測速失敗：' + (e && e.message ? e.message : e)); }
       const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
+    };
+    s.querySelector('#aiUnsafe').onclick = () => { // 5.1.9：手動解除框選閃退保護
+      settings.aiSafeCPU = false; settings.aiCrashN = 0; aiSafeNow = false; settings.aiBenchV = null; settings.aiBenchN = 0; aiBenchedNow = false; saveSettings();
+      aiNote('手動解除框選閃退保護'); aiReleaseNow();
+      s.querySelector('#aiUnsafe').style.display = 'none';
+      const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
+      toast('已解除，下次 AI 框選會重新比較 CPU／GPU');
     };
     s.querySelector('#setDefAdj').onclick = () => openDefAdj('bw');
     // 3.0：還在用舊 AI 引擎的人（按過「暫時不要」或還沒被問）才顯示，升級後消失（3.0.1 搬到自動 AI 框選開關下方）
@@ -4179,6 +4180,8 @@ function aiNote(t) {
 }
 if (settings.aiForceOld) { settings.aiForceOld = false; saveSettings(); aiNote('啟動時是相容模式（舊引擎），改試新引擎'); }
 if (settings.aiSafeCPU && settings.aiCrashN == null) { settings.aiSafeCPU = false; settings.aiCrashN = 1; settings.aiBenchV = null; saveSettings(); aiNote('框選閃退保護（舊版一次就永久 CPU）改回可試 GPU'); }
+// 5.1.9：閃退保護定案（一律 CPU）後，更新到新版本時再給一次機會（再中斷一次就又定案）
+else if (settings.aiSafeCPU && settings.aiSafeVer !== APP_VER) { settings.aiSafeCPU = false; settings.aiCrashN = 1; settings.aiBenchV = null; settings.aiBenchN = 0; saveSettings(); aiNote('更新到新版本，框選閃退保護再給一次 GPU 機會'); }
 async function aiCached() { const st = await aiState(); return st.model && !!aiPickEngine(st); }
 const aiUpgradable = (st) => st.model && st.old && !st.neu && !aiOldNow;
 function aiReset() {
@@ -4210,7 +4213,7 @@ function aiCrashCheck() {
   let was = null; try { was = localStorage.getItem(AI_BATCH_KEY); localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
   if (!was) return;
   settings.aiCrashN = (settings.aiCrashN || 0) + 1; aiSafeNow = true; // 5.1.7：這次打開期間先用 CPU
-  if (settings.aiCrashN >= 2) { settings.aiEP = 'wasm'; settings.aiSafeCPU = true; aiNote('框選又中斷（第 2 次），之後一律用 CPU'); }
+  if (settings.aiCrashN >= 2) { settings.aiEP = 'wasm'; settings.aiSafeCPU = true; settings.aiSafeVer = APP_VER; aiNote('框選又中斷（第 2 次），這個版本一律用 CPU'); }
   else aiNote('框選中斷（第 1 次），這次先用 CPU，下次打開再試 GPU');
   saveSettings();
   setTimeout(() => toast('上次 AI 框選中斷，已改用較省記憶體的方式'), 1500);
@@ -4231,16 +4234,24 @@ function aiInit() {
     const r0 = await aiPost({ type: 'init', engine: eng, ep: aiSafeNow ? 'wasm' : settings.aiEP || 'wasm' });
     aiEngineNow = eng; aiEPNow = r0 && r0.ep;
     // 新引擎還沒比較過 CPU／GPU（例如剛下載完、或新版第一次用）：在背景比較一次
-    if (eng === 'new' && settings.aiBenchV !== AI_NEW_VER) aiBench();
+    // 5.1.9：比出 CPU（GPU 無法使用或比較慢）就每次打開再比一次，連續 3 次（AI_RETRY）才定案；閃退保護中不比
+    if (eng === 'new' && !settings.aiSafeCPU && (settings.aiBenchV !== AI_NEW_VER || (settings.aiEP !== 'webgpu' && (settings.aiBenchN || 1) < AI_RETRY && !aiBenchedNow))) aiBench();
   })();
   aiInitP.catch(() => { aiInitP = null; }); // 載入失敗下次重來
   return aiInitP;
 }
-async function aiBench() {
+const AI_RETRY = 3;
+let aiBenchedNow = false, aiBenchP = null;
+function aiBench() { return aiBenchP || (aiBenchP = aiBench0().finally(() => { aiBenchP = null; })); } // 同時叫兩次共用同一次
+async function aiBench0() {
   try {
     const r = await aiPost({ type: 'bench' });
+    const prev = settings.aiBenchV === AI_NEW_VER ? settings.aiEP : null;
     settings.aiEP = !settings.aiSafeCPU && r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm'; // 4.2.1：閃退保護改過 CPU 就不再改回 GPU
-    settings.aiBenchV = AI_NEW_VER; saveSettings();
+    settings.aiBenchN = settings.aiEP === 'webgpu' ? 0 : prev === 'wasm' ? (settings.aiBenchN || 1) + 1 : 1; // 5.1.9：連續比出 CPU 的次數
+    settings.aiBenchR = { cpu: Math.round(r.cpu), gpu: r.gpu != null ? Math.round(r.gpu) : null };
+    if (prev && prev !== settings.aiEP) aiNote(`框選重新比較：${prev === 'webgpu' ? 'GPU' : 'CPU'} → ${settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}`);
+    aiBenchedNow = true; settings.aiBenchV = AI_NEW_VER; saveSettings();
     console.info('AI bench', r, settings.aiEP);
     aiEPNow = await aiPost({ type: 'setEP', ep: aiSafeNow ? 'wasm' : settings.aiEP }); // 5.1.7：閃退保護第一次只影響這次打開
   } catch (e) { console.warn('AI bench', e); }
@@ -4492,7 +4503,9 @@ const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt
 function srInfoText() {
   const b = settings.srBench, L = settings.srLast, out = [];
   out.push(`AI 引擎：${aiEngineNow ? (aiEngineNow === 'new' ? '新引擎' : '舊引擎（相容模式）') + `，框選用 ${aiEPNow === 'webgpu' ? 'GPU' : 'CPU'}` : aiOldNow ? '這次用相容模式（尚未載入）' : '尚未載入'}`);
-  out.push(`框選：${settings.aiSafeCPU ? '閃退保護，一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}`);
+  const ab = settings.aiBenchR, abN = settings.aiBenchN || 1;
+  out.push(`框選：${settings.aiSafeCPU ? '閃退保護，這個版本一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}` +
+    (ab ? `（比較 CPU ${ab.cpu}、${ab.gpu != null ? 'GPU ' + ab.gpu : 'GPU 無法使用'}${settings.aiEP !== 'webgpu' && !settings.aiSafeCPU ? `；第 ${abN} 次，${abN >= AI_RETRY ? '已定案' : '下次打開再比'}` : ''}）` : ''));
   if (b && b.v === SR_BENCH_V && b.ms > 0) {
     const why = b.gpu != null ? `GPU ${b.gpu}` : `GPU 無法使用${b.gpuWhy ? '：' + b.gpuWhy : ''}`;
     out.push(`精修：${b.ep === 'webgpu' ? 'GPU' : 'CPU'}，每塊約 ${b.ms} 毫秒（測速 CPU ${b.cpu}、${why}${b.ep === 'wasm' ? `；第 ${b.n || 1} 次，${(b.n || 1) >= SR_RETRY ? '已定案' : '下次打開再測'}` : ''}）`);
@@ -4632,7 +4645,7 @@ $('#pageAi').onclick = async () => {
 /* ---------- 版本、更新日誌、問題回報（1.18，比照音樂聽力練習 App） ----------
    APP_VER：封面右下角與設定顯示的完整版號，每次打包都要改（與打包名稱 cocoa-scan.vX.Y 一致；sw.js VERSION 另外每次加 1）。
    日誌只有一欄「v1」，條列目前的功能；新增項目時加 since: '1.xx'，該版之後第一次進首頁會自動跳出一次（3.0.1 起一律黑字，不標紅） */
-const APP_VER = '5.1.8';
+// APP_VER 在檔案開頭宣告（5.1.9：AI 閃退保護在載入時就要用到）
 const REPORT_URL = 'https://forms.gle/PgTtxmJ7itWyKD3T7';
 const CHANGELOG = [
   // 2.0：正式版上線（2.0.1 只改 README，since 跟著改成 2.0.1，紅字與自動跳出才不會因為版號變了而消失）；1.x 的功能濃縮成 v1 的 10 條（黑字）。舊的在上、新的在下（打開時捲到最底）。之後新增的項目加 since，只有目前這一版的才是紅字
@@ -4695,6 +4708,19 @@ function showChangelog() {
 }
 // 有沒有「看過之後才新增」的項目
 // 4.0.2：改成「比上次看過的版本還新」的項目（原本只認 since === APP_VER，出小版本 4.0.1 時 since '4.0' 的項目就不會跳）
+// 5.1.9：更新日誌的「目前版本」快速連點 5 下，顯示／隱藏設定最下方的測試資訊（TEED 協助標記開關、AI 診斷；隱藏時一併關掉標記）
+{
+  let taps = 0, tapT = 0;
+  $('#logCurrent').addEventListener('click', () => {
+    clearTimeout(tapT); tapT = setTimeout(() => { taps = 0; }, 1500);
+    if (++taps < 5) return;
+    taps = 0;
+    settings.teedMarkShown = !settings.teedMarkShown;
+    if (!settings.teedMarkShown) settings.teedMark = false;
+    saveSettings();
+    toast(settings.teedMarkShown ? '已顯示測試資訊（在設定最下方）' : '已隱藏測試資訊');
+  });
+}
 function hasNewLog() { const seen = logSeen() || '0'; return seen !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => it.since && verGt(it.since, seen))); }
 $('#cvVer').textContent = '▸ v' + APP_VER;
 $('#cvVer').onclick = () => showChangelog();
