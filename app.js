@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.3'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '5.3.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -28,7 +28,7 @@ const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone S
 
 /* ---------- 設定 ---------- */
 // 3.1：新使用者預設「稍後裁切」（立即裁切改成每張都進框選，連拍會變慢）；已經存過設定的老使用者維持原本的值。sound＝拍攝音效
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: true, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）；5.3.1：預設改回立即裁切（只影響新用戶，存過設定的人維持原本）
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -1905,7 +1905,7 @@ function openLiveCrop(page, blob, corners, curve, replace) {
       p.corners = c; p.curve = cv; p.rotation = rot; delete p.needCrop;
       if (edited) p.cropUser = true;
       await DB.put('pages', p);
-      // 3.1：先看成品（#capRes）；「繼續編輯」回到框選，「確定」才回到拍攝畫面
+      // 3.1：先看成品（#capRes）；「繼續編輯」回到框選，「確定」才回到拍攝畫面（5.3.1 起自動確定，見 showCapResult）
       const act = await showCapResult(p.id);
       if (act === 'edit') { openLiveCrop(p, blob, c, cv, true); return; }
       if (act === 'ok') { capRes.flying = true; history.back(); try { await capResFly(); } finally { capRes.flying = false; } }
@@ -1971,10 +1971,10 @@ function liveTip(title, html) {
   liveTipT = setTimeout(() => t.classList.remove('show'), 2200);
 }
 $('#cropModeBtn').onclick = () => {
-  settings.cropLater = !settings.cropLater; saveSettings();
+  settings.cropLater = !settings.cropLater; settings.cropSet = true; saveSettings(); // 5.3.1：記下使用者自己切換過（以後改預設時可以分辨）
   updateLiveBtns();
   if (settings.cropLater) liveTip('稍後裁切', '拍完先存起來，可以連續拍<br>之後在文件裡點「✂」那頁裁切');
-  else liveTip('立即裁切', '每拍一張就進入裁切畫面<br>確認成品後再拍下一張');
+  else liveTip('立即裁切', '每拍一張就進入裁切畫面<br>完成後自動回到拍攝'); // 5.3.1：不用再按確定
 };
 $('#liveClose').onclick = () => finishLive();
 $('#cdBtn').onclick = () => {
@@ -2366,12 +2366,15 @@ function capResLayout(ar) {
   const w = Math.min(st.width - 2 * m, (st.height - 2 * m) * ar), h = w / ar;
   Object.assign(pw.style, { left: (st.width - w) / 2 + 'px', top: (st.height - h) / 2 + 'px', width: w + 'px', height: h + 'px', transform: '', transition: '' });
 }
+/* 5.3.1：成品畫面不用再按「確定」（作者：編輯畫面下方已經有成品可看，掃描動畫本身就是確認）。
+   拿掉「繼續編輯」「確定」；有動畫：掃描光刷完停 0.4 秒，飛進左下角縮圖；沒開動畫：成品出現停 1 秒直接收掉；點一下立刻回到拍攝 */
+const CAPRES_HOLD = 400, CAPRES_HOLD_STILL = 1000;
 function showCapResult(pageId) {
   const el = $('#capRes'), pw = el.querySelector('.cr-pw'), base = el.querySelector('.cr-base'), outC = el.querySelector('.cr-out');
   const clip = el.querySelector('.cr-clip'), band = el.querySelector('.cr-band'), spin = el.querySelector('.cr-spin');
   const anim = animOn();
   let sw = null, done = false;
-  el.style.background = ''; el.querySelector('.cr-top').style.visibility = ''; el.querySelector('.cr-bar').style.visibility = '';
+  el.style.background = ''; el.querySelector('.cr-top').style.visibility = ''; el.querySelector('.cr-bar').style.display = 'none'; // 5.3.1：不用按鈕
   base.width = base.height = outC.width = outC.height = 1; pw.style.width = '0px';
   clip.style.clipPath = 'inset(0 0 100% 0)'; clip.style.opacity = ''; clip.style.transition = ''; bandInit(band); spin.classList.toggle('on', true);
   el.classList.add('on');
@@ -2380,6 +2383,8 @@ function showCapResult(pageId) {
   });
   $('#crEdit').onclick = () => { el.classList.remove('on'); for (const c of el.querySelectorAll('canvas')) c.width = c.height = 1; capRes.resolve && capRes.resolve('edit'); }; // 4.2.3：放掉成品大圖
   $('#crOk').onclick = () => capRes.resolve && capRes.resolve('ok');
+  el.onclick = () => capRes.resolve && capRes.resolve('ok'); // 5.3.1：點一下立刻回到拍攝
+  const autoOk = (ms) => setTimeout(() => { if (!done && capRes.resolve) capRes.resolve('ok'); }, ms); // 只結束這一次的成品畫面
   (async () => {
     try {
       await whenReady();
@@ -2394,14 +2399,15 @@ function showCapResult(pageId) {
       const r = await job(f1, p.mode, pageAdjOf(p));
       if (done) return;
       drawTo(outC, r); spin.classList.remove('on');
-      if (!anim) { clip.style.clipPath = 'none'; band.style.display = 'none'; return; }
+      if (!anim) { clip.style.clipPath = 'none'; band.style.display = 'none'; autoOk(CAPRES_HOLD_STILL); return; }
       // 4.0：已掃過的部分淡入成品，剩下的跟著掃描光刷出來
       clip.style.clipPath = `inset(0 0 ${(1 - sw.p) * 100}% 0)`; clip.style.opacity = 0; clip.style.transition = 'opacity .2s';
       requestAnimationFrame(() => { clip.style.opacity = 1; });
       await sw.done();
       if (done) return;
       band.style.display = 'none'; clip.style.clipPath = 'none'; clip.style.transition = '';
-    } catch (e) { console.warn('capRes', e); if (sw) sw.stop(); spin.classList.remove('on'); clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; }
+      autoOk(CAPRES_HOLD);
+    } catch (e) { console.warn('capRes', e); if (sw) sw.stop(); spin.classList.remove('on'); clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; autoOk(CAPRES_HOLD_STILL); }
   })();
   return result;
 }
@@ -4843,6 +4849,8 @@ function showChangelog() {
   const old = CHANGELOG.filter((g) => g.v !== cur), now = CHANGELOG.filter((g) => g.v === cur);
   const block = (g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div>${part(g)}</div>`;
   $('#logList').innerHTML = (old.length ? `<details class="log-old"><summary class="log-ver">過去版本（${esc(old[0].v)}～${esc(old[old.length - 1].v)}）</summary>${old.map(block).join('')}</details>` : '') + now.map(block).join('');
+  const od = $('#logList').querySelector('details.log-old');
+  if (od) od.addEventListener('toggle', () => { $('#logList').scrollTop = $('#logList').scrollHeight; }); // 5.3.1：點開「過去版本」也置底，從新的往回看
   $('#logCurrent').textContent = '目前版本 v' + APP_VER;
   logMarkSeen();
   openModal('logModal');
