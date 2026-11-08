@@ -4839,9 +4839,10 @@ function showChangelog() {
     for (const it of g.items) { const k = subOf(g, it); const last = subs[subs.length - 1]; if (last && last[0] === k) last[1].push(it); else subs.push([k, [it]]); }
     return subs.map(([k, its]) => `${k ? `<div class="log-sub">${esc(k)}</div>` : ''}<ul>${its.map((it) => `<li>${isNew(it) ? '<span class="log-new">新</span>' : ''}${esc(it.t)}</li>`).join('')}</ul>`).join('');
   };
-  $('#logList').innerHTML = CHANGELOG.map((g) => g.v === cur
-    ? `<div class="log-item"><div class="log-ver">${esc(g.v)}</div>${part(g)}</div>`
-    : `<details class="log-item log-old"><summary class="log-ver">${esc(g.v)}</summary>${part(g)}</details>`).join('');
+  // 作者：每個舊大版本各一行收起來，上面空空的又佔位置 → 舊的大版本全部收進一個「過去版本」，點開後全部列出（大版本＋小版本分段）
+  const old = CHANGELOG.filter((g) => g.v !== cur), now = CHANGELOG.filter((g) => g.v === cur);
+  const block = (g) => `<div class="log-item"><div class="log-ver">${esc(g.v)}</div>${part(g)}</div>`;
+  $('#logList').innerHTML = (old.length ? `<details class="log-old"><summary class="log-ver">過去版本（${esc(old[0].v)}～${esc(old[old.length - 1].v)}）</summary>${old.map(block).join('')}</details>` : '') + now.map(block).join('');
   $('#logCurrent').textContent = '目前版本 v' + APP_VER;
   logMarkSeen();
   openModal('logModal');
