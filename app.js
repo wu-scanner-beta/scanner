@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.3.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '5.4'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -595,8 +595,8 @@ async function renderHome() {
       <div class="rmeta">${pages.length} 頁・${fmtDate(doc.updated)}${pages.some((p) => p.needCrop) ? `・<span class="w">✂ ${pages.filter((p) => p.needCrop).length} 頁待裁切</span>` : ''}</div>
       <div class="strip" id="homeStrip"></div>
       <div class="rbtns">
-        <button class="bigbtn alt" id="recentOpen">開啟文件</button>
-        <button class="bigbtn" id="recentPdf">匯出 PDF</button>
+        <button class="bigbtn" id="recentOpen">開啟文件</button>
+        <button class="bigbtn alt danger" id="recentDel">刪除</button>
       </div>
     </div>
     <button class="allbtn" id="allDocs"><span>${ICON.folder}全部文件</span><span class="cnt">${docs.length} 份 ›</span></button>`;
@@ -616,7 +616,12 @@ async function renderHome() {
   $('#recentOpen').onclick = () => openDoc(doc.id);
   // 5.1.9：點卡片空白處也開啟文件（名稱、縮圖、按鈕維持原本功能）
   body.querySelector('.recent').onclick = (e) => { if (!e.target.closest('input, label, button')) openDoc(doc.id); };
-  $('#recentPdf').onclick = () => { state.docId = doc.id; openPdfSheet(); };
+  // 5.4：作者：大家都是點進文件才匯出，「匯出 PDF」沒人用 → 改成刪除（確認提示跟文件裡刪除一樣）
+  $('#recentDel').onclick = async () => {
+    if (!confirm('確定要刪除這份文件與所有頁面？')) return;
+    await deleteDocs([doc.id]);
+    renderHome();
+  };
   $('#allDocs').onclick = () => { renderLibrary(); go('library'); };
 }
 function updateHomeStrip(pages) {
@@ -4132,6 +4137,7 @@ $('#btnSettings').onclick = () => {
     s.querySelectorAll('#setMode button').forEach((b) => b.onclick = () => {
       settings.mode = b.dataset.k; saveSettings();
       s.querySelectorAll('#setMode button').forEach((x) => x.classList.toggle('on', x === b));
+      paintHomeModes(); // 5.4：主畫面的設定列跟著變
     });
     s.querySelectorAll('#setUp button').forEach((b) => b.onclick = () => {
       settings.upscale = b.dataset.k; saveSettings();
@@ -4821,6 +4827,8 @@ const CHANGELOG = [
     { t: '修正大量讀檔有可能閃退的問題', since: '5.2' },
     { t: '提升即時掃描框選準確度（紙張靠近畫面邊緣時）', since: '5.3' },
     { t: '修正連拍時偶爾漏存頁面的問題', since: '5.3' },
+    { t: '主畫面可以直接選擇黑白、灰階、彩色、原圖', since: '5.4' },
+    { t: '最近掃描可以直接刪除文件', since: '5.4' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
@@ -4871,6 +4879,18 @@ function showChangelog() {
     toast(settings.teedMarkShown ? '已顯示測試資訊（在設定最下方）' : '已隱藏測試資訊');
   });
 }
+/* 5.4：主畫面拍攝按鈕上方的設定列（作者：有使用者沒去設定看，不知道還有彩色可以用）。
+   就是設定裡的「新頁面預設模式」（settings.mode），兩邊同步；v6 的「雙頁」小按鈕之後放在這一列右邊 */
+function paintHomeModes() {
+  const el = $('#homeModes'); if (!el) return;
+  if (!el.dataset.ok) {
+    el.innerHTML = MODES.map((m) => `<button data-m="${m.id}">${m.name}</button>`).join('');
+    el.querySelectorAll('button').forEach((b) => b.onclick = () => { settings.mode = b.dataset.m; saveSettings(); paintHomeModes(); });
+    el.dataset.ok = '1';
+  }
+  el.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.m === settings.mode));
+}
+paintHomeModes();
 function hasNewLog() { const seen = logSeen() || '0'; return seen !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => it.since && verGt(it.since, seen))); }
 $('#cvVer').textContent = '▸ v' + APP_VER;
 $('#cvVer').onclick = () => showChangelog();
