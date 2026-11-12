@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '5.4.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.0'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -28,7 +28,7 @@ const HAS_IC = 'ImageCapture' in window; // Android Chrome 有；新版 iPhone S
 
 /* ---------- 設定 ---------- */
 // 3.1：新使用者預設「稍後裁切」（立即裁切改成每張都進框選，連拍會變慢）；已經存過設定的老使用者維持原本的值。sound＝拍攝音效
-const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）；5.3.1：預設改回立即裁切（只影響新用戶，存過設定的人維持原本）
+const DEFAULTS = { mode: 'bw', pdfSize: 'a4', autoShutter: true, cropLater: false, autoAI: false, confirmCrop: true, upscale: 'auto', landscape: true, sound: true, countdown: true, spread: false, v: 2 }; // 5.1.3：倒數拍攝預設開（手動關過的人維持關）；5.3.1：預設改回立即裁切（只影響新用戶，存過設定的人維持原本）
 const settings = (() => {
   let s = {};
   try { s = JSON.parse(localStorage.getItem('cocoscan-settings') || '{}'); } catch (_) {}
@@ -762,12 +762,12 @@ async function stableBlob(file) {
 /* ---------- 高畫質連拍 ---------- */
 const burst = { docId: null, fromDoc: false, onStack: false, count: 0, lastPageId: null, fresh: false, shownKey: null, tok: 0, sw: null, ar: 0 };
 function startBurst(docId) {
-  Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null });
+  Object.assign(burst, { docId, fromDoc: !!docId, onStack: false, count: 0, lastPageId: null, lastIds: [] });
 }
-async function burstAdd(blob, corners, curve, rotation) {
+async function burstAdd(blob, corners, curve, rotation, needCrop) {
   if (!burst.docId) burst.docId = (await createDoc()).id;
-  const page = await addPage(burst.docId, blob, corners, curve, false, rotation || 0);
-  burst.count++; burst.lastPageId = page.id; burst.fresh = true;
+  const page = await addPage(burst.docId, blob, corners, curve, !!needCrop, rotation || 0);
+  burst.count++; burst.lastPageId = page.id; burst.lastIds = [page.id]; burst.fresh = true;
   return page;
 }
 function toBurst() {
@@ -781,6 +781,7 @@ function toBurst() {
 async function renderBurst() {
   $('#burstCount').textContent = burst.count ? `已拍 ${burst.count} 張` : '尚未拍攝';
   $('#burstConfirm').classList.toggle('on', settings.confirmCrop);
+  $('#burstSpread').classList.toggle('on', !!settings.spread); // 6.0
   $('#burstRetake').disabled = $('#burstEdit').disabled = !burst.lastPageId;
   if (!burst.lastPageId) { burst.tok++; if (burst.sw) { burst.sw.stop(); burst.sw = null; } burst.shownKey = null; $('#burstPw').style.visibility = 'hidden'; $('#burstSpin').classList.remove('on'); return; }
   const p = await DB.get('pages', burst.lastPageId);
@@ -853,18 +854,21 @@ $('#burstEdit').onclick = async () => {
   });
 };
 $('#burstConfirm').onclick = () => { settings.confirmCrop = !settings.confirmCrop; saveSettings(); renderBurst(); };
+$('#burstSpread').onclick = () => { setSpread(!settings.spread); renderBurst(); }; // 6.0：只影響之後拍的
 $('#burstRetake').onclick = async () => {
   openCamera();
   if (!burst.lastPageId) return;
   // 5.3：排隊；先刪頁面再改清單（反過來的話中途關掉，留下的頁會被當散頁找回來）
+  // 6.0：雙頁拍的那張拆成兩頁，一起刪
+  const ids = burst.lastIds && burst.lastIds.includes(burst.lastPageId) ? burst.lastIds.slice() : [burst.lastPageId];
   const doc = await docEdit(async () => {
-    await DB.del('pages', burst.lastPageId);
+    for (const id of ids) await DB.del('pages', id);
     const d = await DB.get('docs', burst.docId);
-    d.pageIds = d.pageIds.filter((id) => id !== burst.lastPageId);
+    d.pageIds = d.pageIds.filter((id) => !ids.includes(id));
     await DB.put('docs', d);
     return d;
   });
-  burst.count--; burst.lastPageId = doc.pageIds.length && burst.count ? doc.pageIds[doc.pageIds.length - 1] : null;
+  burst.count -= ids.length; burst.lastIds = []; burst.lastPageId = doc.pageIds.length && burst.count ? doc.pageIds[doc.pageIds.length - 1] : null;
   renderBurst();
 };
 async function finishBurst() {
@@ -890,9 +894,77 @@ async function aiCorners(blob) {
     return { corners: r.corners, curve: r.curve ? normCurve(r.corners, r.curve) : null, teed: teedNote(r) };
   } catch (e) { console.warn('auto AI', e); return { fail: 'error', msg: e && e.message ? e.message : String(e) }; }
 }
+/* ---------- 6.0 雙頁模式 ----------
+   攤開的書拍一張 → 左右兩頁（同一張原圖各存一份，左頁在前）。高畫質拍照、相簿匯入適用；即時掃描之後再做。
+   框選：自動 AI 框選開著用 AI 遮罩找整個攤開的範圍，否則用原本的偵測；書溝有 TEED 時一起用（AI 資料下載過就有）。
+   書溝找不到 → 從正中間切；整個範圍都找不到 → 整張照片從中間切。這兩種情況兩頁都標 ✂ 待裁切（作者選甲） */
+const HALF_L = [[0, 0], [0.5, 0], [0.5, 1], [0, 1]], HALF_R = [[0.5, 0], [1, 0], [1, 1], [0.5, 1]];
+async function spreadSplit(blob, useAI, useTeed) {
+  const { img, url } = await loadImg(blob);
+  try {
+    await whenReady();
+    const mask = useAI ? await aiMask(img) : null;
+    const teed = useAI || useTeed ? await teedMap(img) : null;
+    const f = smallFrame(img, 900);
+    const pl = { buffer: f.data.buffer, width: f.width, height: f.height }, tr = [f.data.buffer];
+    if (mask) { pl.mask = mask; tr.push(mask); }
+    if (teed) { pl.teed = teed; tr.push(teed.buffer); }
+    const r = await wcall('spreadQuad', pl, tr);
+    if (r && r.pages) {
+      if (teedMarkOn()) console.log('spread', r.dbg);
+      return { ok: !!r.gutter, pages: r.pages.map((p) => ({ corners: p.corners, curve: p.curve ? normCurve(p.corners, p.curve) : null })) };
+    }
+  } catch (e) { console.warn('spread', e); }
+  finally { URL.revokeObjectURL(url); }
+  return { ok: false, outer: false, pages: [{ corners: HALF_L.map((p) => p.slice()), curve: null }, { corners: HALF_R.map((p) => p.slice()), curve: null }] };
+}
+const spreadMiss = (sp) => (sp.outer === false ? '找不到書的範圍，已從中間分成兩頁，請自己裁切（✂）' : '找不到書溝，已從中間分成兩頁，請檢查裁切（✂）');
+async function spreadSave(blob, list) {
+  const ids = [];
+  for (const it of list) {
+    const pg = await burstAdd(blob, it.c, it.cv, it.rot, it.need);
+    if (it.edited) { pg.cropUser = true; await DB.put('pages', pg); }
+    ids.push(pg.id);
+  }
+  burst.lastIds = ids; // 重拍上一張＝這張照片拆出來的兩頁一起刪
+}
+async function spreadCamera(blob) {
+  const useAI = await aiAutoOn(), useTeed = useAI || (await aiCached());
+  busy(useAI ? 'AI 框選中…' : '尋找書溝…');
+  let sp;
+  try { sp = await spreadSplit(blob, useAI, useTeed); } finally { unbusy(); if (useTeed) aiReleaseSoon(); }
+  const need = !sp.ok, [L, R] = sp.pages;
+  if (need) toast(spreadMiss(sp));
+  if (!settings.confirmCrop) {
+    await spreadSave(blob, [{ c: L.corners, cv: L.curve, need }, { c: R.corners, cv: R.curve, need }]);
+    toBurst();
+    if (!need) toast(`已加入第 ${burst.count - 1}、${burst.count} 張`);
+    return;
+  }
+  // 每張先確認裁切：先裁左頁，確定後接著裁右頁（右頁沿用左頁的轉向）；兩頁都確定才存。任一頁按取消＝這張不存，重拍＝重新拍
+  openCrop({
+    blob, corners: L.corners, curve: L.curve, retake: true, burst: true, title: '調整左頁範圍',
+    onConfirm: async (c, cv, edited, rot) => {
+      sfxPrime();
+      const left = { c, cv, edited, rot };
+      openCrop({
+        blob, corners: R.corners, curve: R.curve, rotation: rot, retake: true, burst: true, replace: true, title: '調整右頁範圍',
+        onConfirm: async (c2, cv2, ed2, rot2) => { sfxPrime(); await spreadSave(blob, [left, { c: c2, cv: cv2, edited: ed2, rot: rot2 }]); toBurst(); },
+        onRetake: () => openCamera(),
+      });
+    },
+    onRetake: () => openCamera(),
+  });
+}
 $('#fileCamera').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file) return;
+  if (settings.spread) { // 6.0
+    let blob;
+    try { blob = await stableBlob(file); } catch (err) { toast(err.message); return; }
+    await spreadCamera(blob);
+    return;
+  }
   busy('偵測文件邊框…');
   let blob, corners, curve = null;
   try { blob = await stableBlob(file); corners = await detectBlob(blob); }
@@ -922,15 +994,22 @@ $('#fileGallery').addEventListener('change', async (e) => {
   if (!files.length) return;
   let docId = cameraTarget;
   if (!docId) docId = (await createDoc()).id;
-  const useAI = await aiAutoOn();
-  let rejected = 0, aiErr = null, tdone = 0;
+  const useAI = await aiAutoOn(), spread = !!settings.spread, useTeed = spread && (useAI || (await aiCached())); // 6.0
+  let rejected = 0, aiErr = null, tdone = 0, smiss = 0, souter = 0;
   // 4.2.2：開著自動 AI 框選時，和 4.2.1 的批次框選一樣先暫停頁面處理、全部框完再處理（相簿照片解析度高，一邊框一邊處理容易閃退）
-  if (useAI) { busy(`AI 框選中 1 / ${files.length}`); await holdQueue(); aiBatchMark(true); }
+  const hold = useAI || useTeed;
+  if (hold) { busy(`${useAI ? 'AI 框選中' : '匯入中'} 1 / ${files.length}`); await holdQueue(); if (useAI) aiBatchMark(true); }
   try {
   for (let i = 0; i < files.length; i++) {
     busy(`${useAI ? 'AI 框選中' : '匯入中'} ${i + 1} / ${files.length}`);
     try {
       const blob = await stableBlob(files[i]);
+      if (spread) { // 6.0：一張拆成左右兩頁
+        const sp = await spreadSplit(blob, useAI, useTeed);
+        if (!sp.ok) { smiss++; if (sp.outer === false) souter++; }
+        for (const p of sp.pages) await addPage(docId, blob, p.corners, p.curve, !sp.ok);
+        continue;
+      }
       let c = await detectBlob(blob), cv = null;
       if (useAI) {
         const r = await aiCorners(blob);
@@ -939,9 +1018,10 @@ $('#fileGallery').addEventListener('change', async (e) => {
       await addPage(docId, blob, c, cv);
     } catch (err) { toast(err.message); }
   }
-  } finally { if (useAI) { aiBatchMark(false); releaseQueue(); aiReleaseSoon(); } }
+  } finally { if (hold) { if (useAI) aiBatchMark(false); releaseQueue(); aiReleaseSoon(); } }
   unbusy();
   openDoc(docId, current !== 'doc');
+  if (smiss) { toast(files.length === 1 ? spreadMiss({ outer: souter ? false : undefined }) : `${smiss} 張找不到書溝或書的範圍，已從中間分成兩頁（✂）`); return; }
   if (aiErr) toast('AI 框選失敗：' + aiErr);
   else if (rejected) toast((files.length === 1 ? 'AI 判斷不適合，保留原框' : `${rejected} 張 AI 判斷不適合，保留原框`) + teedCount(tdone));
   else if (teedCount(tdone)) toast(`AI 框選完成${teedCount(tdone)}`); // 5.0
@@ -952,8 +1032,10 @@ const live = { running: false };
 const STABLE_MS = 1000;  // 鎖定後大致不動多久就拍（5.1.3：作者覺得 0.5 秒太突然、聚焦圓環來不及顯示，iPhone、Android 都改 1 秒）
 const STABLE_TOL = 0.05;  // 容許的手抖（畫面比例；1.21 從 3% 放寬，作者覺得拿穩了還是拍不下去）
 const EDGE_MARGIN = 0.01; // 紙張四角至少離畫面邊緣 1%（1.4～1.15 是 3%，作者覺得要拿太遠，1.16 放寬）
+let liveSpreadTold = false;
 async function startLive(docId) {
   sfxPrime(); // 3.1：在點擊的當下啟動聲音（iPhone 規定）
+  if (settings.spread && !liveSpreadTold) { liveSpreadTold = true; setTimeout(() => toast('即時掃描目前只拍單頁，雙頁請用高畫質拍照或相簿匯入'), 900); } // 6.0：即時掃描的雙頁之後再做
   if (landOn()) motionStart(); else if (motion.on) motionStop(); // 1.37：只有 Android 用感應器（設定可關）
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
@@ -2571,6 +2653,7 @@ async function openCrop(opts) {
   await setCropView(c);
   if (cropCtx !== c) return;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
+  $('#cropTitle').textContent = opts.title || '調整掃描範圍'; // 6.0：雙頁依序裁左頁、右頁
   $('#cropCancel').textContent = opts.liveCrop ? '稍後裁切' : '取消';
   updateCurveBtn();
   if (opts.replace) { history.replaceState({ s: 'crop', doc: state.docId, i: state.pageIndex }, ''); show('crop'); } else go('crop'); // 3.1 成品畫面按「繼續編輯」：不多疊一層返回紀錄
@@ -4459,12 +4542,15 @@ async function aiUpgrade() {
   return true;
 }
 // 一張圖 → { corners } 或 { reject }
-async function aiFrame(img) {
-  await whenReady();
+async function aiMask(img) {
   const c = canvasOf(320, 320), x = c.getContext('2d', { willReadFrequently: true });
   x.drawImage(img, 0, 0, 320, 320);
   const d = x.getImageData(0, 0, 320, 320);
-  const mask = await aiCall({ type: 'mask', buffer: d.data.buffer }, [d.data.buffer]);
+  return aiCall({ type: 'mask', buffer: d.data.buffer }, [d.data.buffer]);
+}
+async function aiFrame(img) {
+  await whenReady();
+  const mask = await aiMask(img);
   const teed = await teedMap(img); // 4.2：沒有 TEED 資料或出錯時是 null，只用 AI
   const f = smallFrame(img, 900);
   const pl = { buffer: f.data.buffer, width: f.width, height: f.height, mask }, tr = [f.data.buffer, mask];
@@ -4831,6 +4917,10 @@ const CHANGELOG = [
     { t: '主畫面可以直接選擇黑白、灰階、彩色、原圖', since: '5.4' },
     { t: '最近掃描可以直接刪除文件', since: '5.4' },
   ] },
+  // 6.0：雙頁模式（新功能＝大版本）
+  { v: 'v6', items: [
+    { t: '新增雙頁模式：攤開的書拍一張，自動拆成左右兩頁', since: '6.0' },
+  ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
 const verNum = (v) => v.split('.').map(Number);
@@ -4888,8 +4978,15 @@ function paintHomeModes() {
     el.innerHTML = MODES.map((m) => `<button data-m="${m.id}">${m.name}</button>`).join('');
     el.querySelectorAll('button').forEach((b) => b.onclick = () => { settings.mode = b.dataset.m; saveSettings(); paintHomeModes(); });
     el.dataset.ok = '1';
+    $('#homeSpread').onclick = () => setSpread(!settings.spread); // 6.0
   }
   el.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.m === settings.mode));
+  const sb = $('#homeSpread'); sb.classList.toggle('on', !!settings.spread); sb.setAttribute('aria-pressed', settings.spread ? 'true' : 'false');
+}
+// 6.0 雙頁模式開關（主畫面、高畫質連拍畫面共用，記住上次的選擇）
+function setSpread(on) {
+  settings.spread = !!on; saveSettings(); paintHomeModes();
+  toast(on ? '雙頁模式：攤開的書拍一張，自動拆成左右兩頁' : '已改回單頁模式');
 }
 paintHomeModes();
 function hasNewLog() { const seen = logSeen() || '0'; return seen !== APP_VER && CHANGELOG.some((g) => g.items.some((it) => it.since && verGt(it.since, seen))); }

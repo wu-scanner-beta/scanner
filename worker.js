@@ -601,6 +601,7 @@ function maskQuad(cv, msg) {
   })();
   clean();
   if (qa < ca * 0.8 || qa > ca * 1.25) return { reject: 'mismatch' };
+  if (msg.spread) return asp < 0.3 ? { reject: 'aspect' } : { q, G0 }; // 6.0 雙頁：整個攤開的範圍（兩頁合起來比較扁），書溝交給 spreadQuad
   if (asp < 0.5) return { reject: 'aspect' };
   // 攤開的書：AI 只認得「紙」，兩頁連在一起都是紙，不會在書溝停下來。
   // 原本的偵測切出單頁（凹口／書溝）時：AI 只在左或右一側比它寬 → gutterSide 修正那一邊；修不了而且 AI 框得比它大很多＝把整本書框進去了，交給原本的偵測
@@ -626,6 +627,85 @@ function maskQuad(cv, msg) {
 // 沿著每條橫向的邊取樣：先在 AI 遮罩上找紙張的分界，再用照片「裡亮外暗」修準位置；
 // 只用明暗清楚的點（被別張紙蓋住的那段兩邊都白，自動不算），排除離群點後擬合平滑的曲線。
 // 角附近沒有可信的點時，那個角固定不動（保留 1.27 推回來的角）。回傳 null＝維持直線。
+/* ---------- 6.0 雙頁模式：攤開的書拍一張，拆成左右兩頁 ----------
+   1) 整個攤開的範圍：有 AI 遮罩用 maskQuad（spread），沒有就用原本的偵測（偵測成單頁／書溝時算找不到）
+   2) 把範圍拉正成寬 480 的長方形，在 35%～65% 之間找書溝（可以是斜線）：
+      TEED 邊緣（書溝摺痕每張都很清楚）＋陰影比兩側暗＋細暗線，減掉線上有墨水（切過五線譜、音符的不是書溝）
+      沒有 TEED 時只靠陰影與細暗線，要求更嚴（作者 16 張實拍：有 TEED 16 張都對；沒有 TEED 13 張對，錯的都是線上有墨水）
+   3) 左頁＝左上、書溝上、書溝下、左下；右頁＝書溝上、右上、右下、書溝下；有 AI 遮罩時左右頁各自貼合上下邊的彎曲
+   回傳 { pages: [{ corners, curve }, { corners, curve }], gutter: true/false } 或 { fail: 'outer' }（找不到書溝時從正中間切，gutter＝false）*/
+function spreadQuad(cv, msg) {
+  const { width: w, height: h } = msg;
+  const rgba = new Uint8Array(msg.buffer);
+  let q = null, G0 = null;
+  if (msg.mask) {
+    const r = maskQuad(cv, Object.assign({}, msg, { buffer: rgba.slice().buffer, spread: true }));
+    if (r && r.q) { q = r.q; G0 = r.G0; }
+  } else {
+    const r = detectQuad(cv, rgba, w, h, false);
+    if (r && r.corners && !r.notch && !r.gutter && r.area > 0.25) q = orderCorners(r.corners.map((p) => [p[0] * w, p[1] * h]));
+  }
+  if (!q) return { fail: 'outer' };
+  const src = new cv.Mat(h, w, cv.CV_8UC4); src.data.set(rgba);
+  const gray = new cv.Mat(); cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY); src.delete();
+  if (!G0) { const b = new cv.Mat(); cv.GaussianBlur(gray, b, new cv.Size(5, 5), 0); G0 = b.data.slice(); b.delete(); }
+  const len = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const wd = (len(q[0], q[1]) + len(q[3], q[2])) / 2, ht = (len(q[0], q[3]) + len(q[1], q[2])) / 2;
+  const W = 480, H = Math.max(120, Math.min(960, Math.round((W * ht) / wd)));
+  const dst = [[0, 0], [W, 0], [W, H], [0, H]];
+  const warpTo = (m, qq) => {
+    const a = cv.matFromArray(4, 1, cv.CV_32FC2, qq.flat()), b = cv.matFromArray(4, 1, cv.CV_32FC2, dst.flat());
+    const M = cv.getPerspectiveTransform(a, b), o = new cv.Mat();
+    cv.warpPerspective(m, o, M, new cv.Size(W, H), cv.INTER_LINEAR, cv.BORDER_REPLICATE);
+    a.delete(); b.delete(); M.delete();
+    return o;
+  };
+  const Gw = warpTo(gray, q); gray.delete();
+  let Tw = null;
+  if (msg.teed) {
+    const tm = new cv.Mat(msg.teed.height, msg.teed.width, cv.CV_8UC1); tm.data.set(new Uint8Array(msg.teed.buffer));
+    const tw = warpTo(tm, q.map((p) => [(p[0] * msg.teed.width) / w, (p[1] * msg.teed.height) / h])); tm.delete();
+    Tw = tw.data.slice(); tw.delete();
+  }
+  // 背景亮度（去掉墨水）：橫 13、直 13 的閉運算
+  const Bm = new cv.Mat(), k1 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(13, 1)), k2 = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(1, 13));
+  cv.morphologyEx(Gw, Bm, cv.MORPH_CLOSE, k1); cv.morphologyEx(Bm, Bm, cv.MORPH_CLOSE, k2);
+  const G = Gw.data.slice(), B = Bm.data.slice(); [Gw, Bm, k1, k2].forEach((m) => m.delete());
+  const at = (A, x, y) => A[y * W + Math.min(W - 1, Math.max(0, x))];
+  const ys = []; for (let y = Math.round(H * 0.04); y < H * 0.96; y += 3) ys.push(y);
+  const x0 = Math.round(W * 0.35), x1 = Math.round(W * 0.65), slant = W * 0.08;
+  let best = null;
+  for (let xt = x0; xt <= x1; xt += 2) for (let xb = Math.max(x0, Math.ceil(xt - slant)); xb <= Math.min(x1, xt + slant); xb += 2) {
+    let dk = 0, ln = 0, ed = 0, ik = 0;
+    for (const y of ys) {
+      const x = Math.round(xt + ((xb - xt) * y) / H), b = at(B, x, y);
+      dk += Math.max(-20, Math.min(60, (at(B, x - 12, y) + at(B, x + 12, y)) / 2 - b));
+      ln += Math.max(0, Math.min(30, (at(B, x - 3, y) + at(B, x + 3, y)) / 2 - Math.min(b, at(G, x, y))));
+      if (Tw) ed += at(Tw, x, y);
+      let n = 0; for (let o = -5; o <= 5; o += 2) if (at(B, x + o, y) - at(G, x + o, y) > 35) n++;
+      ik += n / 6;
+    }
+    const N = ys.length; dk /= N * 30; ln /= N * 10; ed /= N * 255; ik = (ik / N) * 4;
+    const s = Tw ? dk + ed * 2 - ik : dk + ln - ik;
+    if (!best || s > best.s) best = { s, xt, xb, dk, ln, ed, ik };
+  }
+  const found = !!best && (Tw ? best.ed >= 0.3 && best.ik <= 0.4 : best.ik <= 0.1 && best.ln >= 1);
+  const gx = found ? [best.xt, best.xb] : [W / 2, W / 2];
+  const Hi = homog(cv, dst, q);
+  const gt = applyH(Hi, [gx[0], 0]), gb = applyH(Hi, [gx[1], H]);
+  const halves = [[q[0], gt, gb, q[3]], [gt, q[1], q[2], gb]];
+  const nz = (p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))];
+  const pages = halves.map((hq) => {
+    const cx = hq.reduce((a, p) => a + p[0], 0) / 4, cy = hq.reduce((a, p) => a + p[1], 0) / 4, inset = 0.006;
+    const qq = hq.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
+    let cq = qq, curve = null;
+    if (msg.mask) { try { const mc = maskCurve(G0, new Uint8Array(msg.mask), w, h, qq); if (mc) { cq = mc.corners; curve = mc.curve; } } catch (e) { /* 維持直線 */ } }
+    return { corners: cq.map(nz), curve: curve ? curve.map((e) => e.map(nz)) : null };
+  });
+  const r3 = (v) => Math.round(v * 100) / 100;
+  return { pages, gutter: found, outer: q.map(nz), dbg: best ? { s: r3(best.s), dk: r3(best.dk), ln: r3(best.ln), ed: r3(best.ed), ik: r3(best.ik), x: [r3(best.xt / W), r3(best.xb / W)], teed: !!Tw } : null };
+}
+
 function maskCurve(G, mask, w, h, Q) {
   const bil = (A, W, H, x, y) => {
     if (x < 0 || y < 0 || x >= W - 1 || y >= H - 1) return -1;
@@ -1510,6 +1590,8 @@ self.onmessage = async (e) => {
       let r = r0;
       if (e.data.teed) { try { r = teedFuse(cv, r0, e.data); } catch (err) { console.warn('TEED 互助失敗', err); } } // 4.2：出錯就用原本 AI 的結果
       self.postMessage({ id, ok: true, result: r });
+    } else if (type === 'spreadQuad') { // 6.0 雙頁模式
+      self.postMessage({ id, ok: true, result: spreadQuad(cv, e.data) });
     } else if (type === 'process') {
       const r = processPage(cv, e.data);
       self.postMessage({ id, ok: true, result: r }, [r.buffer]);
