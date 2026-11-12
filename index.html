@@ -338,6 +338,12 @@ input[type=file]{display:none}
 #burstSpin.on{display:grid}
 #burstSpin .spin{border-color:rgba(255,255,255,.3);border-top-color:#fff}
 #burstCount{position:absolute;top:14px;left:50%;transform:translateX(-50%);z-index:2}
+/* 6.0.1 雙頁：翻看左頁／右頁 */
+#burstStage{touch-action:pan-y}
+.bdots{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:2;display:flex;gap:2px;background:rgba(28,19,14,.6);border-radius:999px;padding:3px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.bdots button{padding:5px 14px;border-radius:999px;font-size:13px;font-weight:700;color:rgba(255,255,255,.75)}
+.bdots button.on{background:var(--cream);color:var(--cocoa)}
+#cropStep{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:5;color:#fff;pointer-events:none}
 #burst .controls{flex:none;padding:6px 20px calc(var(--sb) + 18px)}
 #burst .row{display:flex;align-items:center;justify-content:space-between;margin-top:12px}
 #burstNext{width:84px;height:84px;border-radius:50%;background:var(--cream);color:var(--cocoa);display:grid;place-items:center;box-shadow:0 6px 20px rgba(0,0,0,.35)}
@@ -727,6 +733,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
     <button class="tbtn solid" id="cropOk">確定</button>
   </header>
   <div id="cropStage">
+    <div class="pill" id="cropStep" style="display:none"></div><!-- 6.0.1 -->
     <img id="cropImg" alt="">
     <svg id="cropSvg"></svg>
     <div id="pip"><canvas id="pipCv"></canvas><div class="pip-gl"></div><span class="pip-lb">成品預覽</span></div>
@@ -770,6 +777,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
     <div id="burstPw"><canvas class="cr-base"></canvas><div class="cr-clip"><canvas class="cr-out"></canvas></div><div class="cf-band cr-band"></div></div>
     <div class="cr-spin" id="burstSpin"><div class="spin"></div></div>
     <div class="pill" id="burstCount">尚未拍攝</div>
+    <div class="bdots" id="burstDots" style="display:none"><button>左頁</button><button>右頁</button></div><!-- 6.0.1 -->
   </div>
   <div class="controls">
     <div class="opts"><div class="opt"><span>每張先確認裁切</span><button class="tg" id="burstConfirm" aria-label="每張先確認裁切"></button></div><div class="opt"><span>雙頁</span><button class="tg" id="burstSpread" aria-label="雙頁模式"></button></div></div>

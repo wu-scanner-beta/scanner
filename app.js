@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.0'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.0.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -767,7 +767,7 @@ function startBurst(docId) {
 async function burstAdd(blob, corners, curve, rotation, needCrop) {
   if (!burst.docId) burst.docId = (await createDoc()).id;
   const page = await addPage(burst.docId, blob, corners, curve, !!needCrop, rotation || 0);
-  burst.count++; burst.lastPageId = page.id; burst.lastIds = [page.id]; burst.fresh = true;
+  burst.count++; burst.lastPageId = page.id; burst.lastIds = [page.id]; burst.viewId = null; burst.fresh = true;
   return page;
 }
 function toBurst() {
@@ -783,8 +783,9 @@ async function renderBurst() {
   $('#burstConfirm').classList.toggle('on', settings.confirmCrop);
   $('#burstSpread').classList.toggle('on', !!settings.spread); // 6.0
   $('#burstRetake').disabled = $('#burstEdit').disabled = !burst.lastPageId;
+  burstDots();
   if (!burst.lastPageId) { burst.tok++; if (burst.sw) { burst.sw.stop(); burst.sw = null; } burst.shownKey = null; $('#burstPw').style.visibility = 'hidden'; $('#burstSpin').classList.remove('on'); return; }
-  const p = await DB.get('pages', burst.lastPageId);
+  const p = await DB.get('pages', burstViewId());
   if (!p) return;
   const key = p.id + procKey(p);
   if (key === burst.shownKey) { burstLayout(); return; } // 同一張、沒改過（例如框選畫面按取消回來）：不重播
@@ -839,10 +840,38 @@ async function burstShow(p, anim) {
   } finally { if (alive()) resumeQueue(); }
 }
 $('#burstNext').onclick = () => openCamera();
+/* 6.0.1：雙頁拍的那張可以翻看左頁／右頁（作者：只看得到一頁）。左右滑動或點下方「左頁・右頁」；預設顯示右頁（最後一頁）。
+   「繼續編輯」編輯目前看到的那一頁；「重拍上一張」照舊兩頁一起刪 */
+const burstPair = () => (burst.lastIds && burst.lastIds.length === 2 && burst.lastIds.includes(burst.lastPageId) ? burst.lastIds : null);
+const burstViewId = () => { const pr = burstPair(); return pr && burst.viewId && pr.includes(burst.viewId) ? burst.viewId : burst.lastPageId; };
+function burstDots() {
+  const el = $('#burstDots'), pr = burstPair();
+  el.style.display = pr ? '' : 'none';
+  if (!pr) return;
+  const cur = burstViewId();
+  el.querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', pr[i] === cur));
+}
+function burstFlip(i) {
+  const pr = burstPair(); if (!pr || pr[i] === burstViewId()) return;
+  burst.viewId = pr[i]; renderBurst();
+}
+$('#burstDots').querySelectorAll('button').forEach((b, i) => b.onclick = () => burstFlip(i));
+{
+  let sx = null, sy = 0;
+  const st = $('#burstStage');
+  st.addEventListener('pointerdown', (e) => { sx = e.clientX; sy = e.clientY; });
+  st.addEventListener('pointerup', (e) => {
+    if (sx === null) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy; sx = null;
+    const pr = burstPair(); if (!pr || Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+    burstFlip(dx < 0 ? 1 : 0); // 往左滑看右頁、往右滑看左頁
+  });
+  st.addEventListener('pointercancel', () => { sx = null; });
+}
 // 3.1.6：繼續編輯上一張：回到框選畫面，確定後重新顯示成品（含動畫）
 $('#burstEdit').onclick = async () => {
   if (!burst.lastPageId) return;
-  const p = await DB.get('pages', burst.lastPageId); if (!p) return;
+  const p = await DB.get('pages', burstViewId()); if (!p) return; // 6.0.1：雙頁時編輯目前看到的那一頁
   openCrop({
     blob: p.original, corners: p.corners, curve: p.curve || null, rotation: p.rotation || 0,
     onConfirm: async (c, cv, edited, rot) => {
@@ -868,7 +897,7 @@ $('#burstRetake').onclick = async () => {
     await DB.put('docs', d);
     return d;
   });
-  burst.count -= ids.length; burst.lastIds = []; burst.lastPageId = doc.pageIds.length && burst.count ? doc.pageIds[doc.pageIds.length - 1] : null;
+  burst.count -= ids.length; burst.lastIds = []; burst.viewId = null; burst.lastPageId = doc.pageIds.length && burst.count ? doc.pageIds[doc.pageIds.length - 1] : null;
   renderBurst();
 };
 async function finishBurst() {
@@ -944,11 +973,13 @@ async function spreadCamera(blob) {
   // 每張先確認裁切：先裁左頁，確定後接著裁右頁（右頁沿用左頁的轉向）；兩頁都確定才存。任一頁按取消＝這張不存，重拍＝重新拍
   openCrop({
     blob, corners: L.corners, curve: L.curve, retake: true, burst: true, title: '調整左頁範圍',
+    spread: { step: 1, other: R.corners, label: '右頁（下一步）' }, okText: '下一頁', // 6.0.1：另一頁標出來、步驟提示、確定鈕改字
     onConfirm: async (c, cv, edited, rot) => {
       sfxPrime();
       const left = { c, cv, edited, rot };
       openCrop({
         blob, corners: R.corners, curve: R.curve, rotation: rot, retake: true, burst: true, replace: true, title: '調整右頁範圍',
+        spread: { step: 2, other: c, label: '左頁 ✓' },
         onConfirm: async (c2, cv2, ed2, rot2) => { sfxPrime(); await spreadSave(blob, [left, { c: c2, cv: cv2, edited: ed2, rot: rot2 }]); toBurst(); },
         onRetake: () => openCamera(),
       });
@@ -1074,13 +1105,15 @@ async function startLive(docId) {
     let camPerm = null;
     if (IS_IOS) { try { camPerm = (await navigator.permissions.query({ name: 'camera' })).state; } catch (_) {} }
     const camT0 = performance.now();
-    const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
+    let stream = await camOpen(useIC);
     const camDt = performance.now() - camT0;
+    stream = await camToMain(stream, useIC); // 6.0.1：iPhone 換成主鏡頭
     // 2.1：同一次要詢問 AI 下載時不顯示相機提示（一次只出現一個要讀的東西，下次進來才輪到它）
     if (!aiAsk && IS_IOS && ((camPerm === 'prompt' && camDt > 500) || (camPerm === null && camDt > 1000))) showCamTip();
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream;
     live.track = stream.getVideoTracks()[0];
+    if (IS_IOS && teedMarkOn()) setTimeout(() => toast('鏡頭：' + (lensName() || '未知')), 1200); // 6.0.1 測試資訊開著時顯示用哪顆鏡頭
     const v = $('#video');
     v.srcObject = stream;
     await v.play().catch(() => {});
@@ -1158,21 +1191,46 @@ function setPhotoSettings() {
     live.photoSettings = { imageWidth: Math.floor(W.max * s), imageHeight: Math.floor(H.max * s) };
   }).catch(() => {});
 }
-function camConstraints(useIC) {
-  return {
-    audio: false,
-    video: useIC
-      ? { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1440 } }
-      : { facingMode: { ideal: 'environment' }, width: { ideal: 4096 }, height: { ideal: 3072 } },
-  };
+function camConstraints(useIC, devId) {
+  const sz = useIC ? { width: { ideal: 1920 }, height: { ideal: 1440 } } : { width: { ideal: 4096 }, height: { ideal: 3072 } };
+  return { audio: false, video: Object.assign(devId ? { deviceId: { exact: devId } } : { facingMode: { ideal: 'environment' } }, sz) };
 }
+/* 6.0.1：iPhone 即時掃描只用主鏡頭（作者：拍攝時有時會跳一下，像在切換鏡頭；通常不會拍那麼近，主鏡頭畫質好得多）。
+   只要「後鏡頭」時 Safari 給的是會自動切換的組合相機（雙廣角／三鏡頭），靠近時會跳到超廣角（微距）。
+   網頁要先拿到相機權限才看得到鏡頭名稱：第一次照舊開，再找名稱是「後置相機」（Back Camera）的那顆換過去，記在 settings.camMain；
+   之後直接開它。打不開（例如換了 ID）就清掉、用原本的方式並重新找。Android 不動；高畫質拍照是系統相機，管不到 */
+const isMainLens = (l) => /後置|back/i.test(l) && !/超廣角|廣角|雙|三|望遠|ultra|wide|dual|triple|tele/i.test(l);
+async function camOpen(useIC) {
+  if (IS_IOS && settings.camMain) {
+    try { return await navigator.mediaDevices.getUserMedia(camConstraints(useIC, settings.camMain)); }
+    catch (e) { console.warn('main lens', e); settings.camMain = null; saveSettings(); }
+  }
+  return navigator.mediaDevices.getUserMedia(camConstraints(useIC));
+}
+async function camToMain(stream, useIC) {
+  if (!IS_IOS || settings.camMain) return stream;
+  try {
+    const cur = stream.getVideoTracks()[0], devs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+    const main = devs.find((d) => isMainLens(d.label || ''));
+    if (!main) return stream;
+    const curId = cur && cur.getSettings ? cur.getSettings().deviceId : null;
+    if (curId === main.deviceId) { settings.camMain = main.deviceId; saveSettings(); return stream; }
+    stream.getTracks().forEach((t) => t.stop());
+    try {
+      const s2 = await navigator.mediaDevices.getUserMedia(camConstraints(useIC, main.deviceId));
+      settings.camMain = main.deviceId; saveSettings();
+      return s2;
+    } catch (e) { console.warn('main lens', e); return navigator.mediaDevices.getUserMedia(camConstraints(useIC)); }
+  } catch (e) { console.warn('lens list', e); return stream; }
+}
+const lensName = () => { try { return (live.track && live.track.label) || ''; } catch (_) { return ''; } };
 // 1.31：重新開一次相機（iPhone 下載 AI 資料後相機畫面會凍結）；已拍的頁與文件保留，失敗就結束掃描
 async function restartCamera() {
   if (!live.running) return;
   try {
     if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
     const useIC = HAS_IC && !IS_IOS;
-    const stream = await navigator.mediaDevices.getUserMedia(camConstraints(useIC));
+    const stream = await camOpen(useIC); // 6.0.1：iPhone 主鏡頭
     if (!live.running) { stream.getTracks().forEach((t) => t.stop()); return; }
     live.stream = stream; live.track = stream.getVideoTracks()[0];
     if (useIC) { try { live.ic = new ImageCapture(live.track); setPhotoSettings(); } catch (_) {} }
@@ -2654,6 +2712,9 @@ async function openCrop(opts) {
   if (cropCtx !== c) return;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
   $('#cropTitle').textContent = opts.title || '調整掃描範圍'; // 6.0：雙頁依序裁左頁、右頁
+  $('#cropOk').textContent = opts.okText || '確定';
+  const stp = $('#cropStep'); stp.style.display = opts.spread ? '' : 'none';
+  if (opts.spread) stp.textContent = opts.spread.step === 1 ? '1／2 左頁' : '2／2 右頁';
   $('#cropCancel').textContent = opts.liveCrop ? '稍後裁切' : '取消';
   updateCurveBtn();
   if (opts.replace) { history.replaceState({ s: 'crop', doc: state.docId, i: state.pageIndex }, ''); show('crop'); } else go('crop'); // 3.1 成品畫面按「繼續編輯」：不多疊一層返回紀錄
@@ -2777,6 +2838,17 @@ function drawCrop() {
   html += `<rect x="0" y="0" width="${w}" height="${h}" fill="rgba(28,19,14,.55)" mask="url(#m)"/>`;
   html += `<polygon points="${poly}" fill="none" stroke="#F2C48D" stroke-width="2.5" stroke-linejoin="round"/>`;
   $('#cropSvg').innerHTML = html;
+  // 6.0.1 雙頁：另一頁的範圍（原始照片座標，跟著目前的轉向）畫虛線框並標示，只是提示、不能拖
+  const sp = cropCtx.spread;
+  if (sp && sp.other) {
+    const O = rotQuad(sp.other, null, cropCtx.rot).corners.map((p) => [p[0] * w, p[1] * h]);
+    const ox = O.reduce((a, p) => a + p[0], 0) / 4, oy = O.reduce((a, p) => a + p[1], 0) / 4;
+    const tw = sp.label.length * 15 + 26;
+    html = `<polygon points="${O.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}" fill="rgba(28,19,14,.25)" stroke="rgba(255,255,255,.55)" stroke-width="1.5" stroke-dasharray="6 5" stroke-linejoin="round"/>`
+      + `<rect x="${ox - tw / 2}" y="${oy - 17}" width="${tw}" height="34" rx="17" fill="rgba(28,19,14,.72)"/>`
+      + `<text x="${ox}" y="${oy + 5.5}" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">${sp.label}</text>`;
+    $('#cropSvg').insertAdjacentHTML('beforeend', html);
+  }
   // 控制點另外畫在最上層（1.12）：預覽小視窗蓋到時也看得到、拖得到
   html = '';
   if (cropCtx.curveMode && curve) {
