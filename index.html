@@ -257,6 +257,12 @@ input[type=file]{display:none}
 #adjPanel{display:none;flex:none;background:var(--surface);padding:6px 14px calc(var(--sb) + 10px);border-top:1px solid var(--line)}
 #page.adjusting #adjPanel{display:block}
 #page.adjusting .modes,#page.adjusting .dock,#page.adjusting .navarrow,#page.adjusting #viewImg{display:none}
+/* 6.1.2 橫放兩頁並排：書背在正中間；選到的頁加外框（工具作用在這頁） */
+#viewDuo{position:absolute;inset:0;pointer-events:none}
+#viewDuo img{position:absolute;background:#fff;box-shadow:0 4px 22px rgba(58,40,30,.25);max-width:none;max-height:none}
+#viewDuo img.sel{outline:2.5px solid var(--caramel);outline-offset:3px}
+#page.adjusting #viewDuo{display:none!important}
+#duoSide{font-size:12.5px;padding:6px 10px;color:var(--cocoa);white-space:nowrap}
 .adjhead{display:flex;align-items:center;gap:6px}
 .adjhead b{flex:1;font-size:15.5px;color:var(--cocoa-d)}
 .adjhead .tbtn{color:var(--cocoa);padding:7px 10px;font-size:14px}
@@ -869,11 +875,13 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   <header class="bar">
     <button class="ibtn" id="pageBack" aria-label="返回"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
     <h1 id="pageTitle" style="text-align:center;font-size:16px"></h1>
+    <button class="tbtn" id="duoSide" style="display:none" aria-label="第一頁在左或右">第一頁在左</button><!-- 6.1.2 -->
     <button class="aibtn" id="pageAi" aria-label="AI 精修">✨ 精修</button>
     <button class="ibtn" id="pageDel" aria-label="刪除此頁"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/></svg></button>
   </header>
   <div id="viewStage">
     <img id="viewImg" alt="" draggable="false">
+    <div id="viewDuo" style="display:none"><img id="duoL" alt="" draggable="false"><img id="duoR" alt="" draggable="false"></div><!-- 6.1.2 橫放兩頁 -->
     <button class="navarrow" id="prevBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></button>
     <button class="navarrow" id="nextBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></button>
     <div id="viewBusy"><div class="spin"></div></div>

@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.1.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.1.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -551,6 +551,7 @@ function askSheet(title, msg, okText, cancelText, danger) {
 $('#sheetWrap').addEventListener('click', (e) => { if (e.target.id === 'sheetWrap' && Date.now() - sheetOpenAt > 400) closeSheet(); });
 
 const ICON = {
+  book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.5C10 5 7 4.5 3 5v13c4-.5 7 0 9 1.5 2-1.5 5-2 9-1.5V5c-4-.5-7 0-9 1.5z"/><path d="M12 6.5v13"/></svg>', // 6.1.2
   ai: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.8 4.6L18.5 9l-4.7 1.6L12 15l-1.8-4.4L5.5 9l4.7-1.4z"/><path d="M19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8z"/></svg>',
   live: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5a2 2 0 0 1 2-2h3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M7 12h10"/></svg>',
   camera: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
@@ -928,8 +929,8 @@ flipDrag($('#burstStage'), {
   snap: () => { const pw = $('#burstPw'); return snapCanvases(pw, [...pw.querySelectorAll('canvas')]); },
   commit: (d) => {
     const pr = burstPair(); burst.viewId = pr[pr.indexOf(burstViewId()) + d];
-    const u = burst.under; renderBurst().then(() => setTimeout(() => { if (burst.under === u) { burst.under.remove(); burst.under = null; } }, 80));
     setTimeout(() => { burst.dragged = false; }, 0);
+    return renderBurst();
   },
   cleanup: burstUnderClean,
 });
@@ -2860,7 +2861,7 @@ function snapCanvases(el, list) {
 }
 // 6.1.1：翻頁的紙（作者：iPhone 17 上太快、幾乎看不到）——0.7 秒慢起慢停；翻過一半後顯示紙的背面，整段都看得到。
 // flipSheet 可以跟著手指（set(進度 0～1)），放開時 finish(翻完／彈回)
-function flipSheet(host, snap, dir) {
+function flipSheet(host, snap, dir, backImg) {
   const hr = host.getBoundingClientRect(), r = snap.rect;
   const wrap = document.createElement('div');
   Object.assign(wrap.style, { position: 'absolute', left: r.left - hr.left + 'px', top: r.top - hr.top + 'px', width: r.width + 'px', height: r.height + 'px', zIndex: 20, pointerEvents: 'none', perspective: Math.max(1400, r.width * 3.2) + 'px' });
@@ -2873,6 +2874,7 @@ function flipSheet(host, snap, dir) {
   Object.assign(sh.style, { position: 'absolute', inset: 0, opacity: 0, background: `linear-gradient(to ${dir > 0 ? 'left' : 'right'}, rgba(0,0,0,.45), rgba(0,0,0,0) 70%)` });
   const shB = document.createElement('div');
   Object.assign(shB.style, { position: 'absolute', inset: 0, opacity: 0, background: `linear-gradient(to ${dir > 0 ? 'right' : 'left'}, rgba(0,0,0,.3), rgba(0,0,0,0) 60%)` });
+  if (backImg) { back.style.background = '#fff'; const bi = new Image(); bi.src = backImg.src; bi.style.cssText = 'position:absolute;inset:0;width:100%;height:100%'; back.appendChild(bi); } // 6.1.2 兩頁並排：背面是下一組的左頁（或上一組的右頁）
   front.append(snap.canvas, sh); back.appendChild(shB); pg.append(front, back); wrap.appendChild(pg);
   if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
   host.appendChild(wrap);
@@ -2904,7 +2906,7 @@ function bookFlip(host, snap, dir) {
 function flipDrag(host, o) {
   let st = null, drag = null, n = 0;
   const reset = () => { st = null; };
-  host.addEventListener('pointerdown', (e) => { n++; st = n === 1 && flipOn() && o.ready() ? { x: e.clientX, y: e.clientY, t: performance.now() } : null; if (n > 1 && drag) { const d = drag; drag = null; d.ctl.finish(false).then(() => o.cleanup()); } });
+  host.addEventListener('pointerdown', (e) => { n++; st = n === 1 && flipOn() && o.ready() ? { x: e.clientX, y: e.clientY, t: performance.now() } : null; if (n > 1 && drag) { const d = drag; drag = null; d.ctl.finish(d.rev).then(() => o.cleanup()); } });
   host.addEventListener('pointermove', (e) => {
     if (!st) return;
     const dx = e.clientX - st.x, dy = e.clientY - st.y;
@@ -2912,13 +2914,15 @@ function flipDrag(host, o) {
       if (Math.abs(dx) < 12 || Math.abs(dx) < Math.abs(dy) * 1.5) { if (Math.abs(dy) > 16) st = null; return; }
       const dir = dx < 0 ? 1 : -1;
       if (!o.canFlip(dir)) { st = null; return; }
-      const under = o.under(dir); if (!under) { st = null; return; }
-      const snap = o.snap(); if (!snap) { o.cleanup(); st = null; return; }
-      drag = { dir, ctl: flipSheet(host, snap, dir), w: snap.rect.width || host.clientWidth };
+      const parts = o.parts ? o.parts(dir) : null; if (o.parts && !parts) { st = null; return; }
+      const under = o.under(dir, parts); if (!under) { st = null; return; }
+      const snap = o.snap(dir, parts); if (!snap) { o.cleanup(); st = null; return; }
+      const rev = !!(parts && parts.rev); // 6.1.2：上一頁從左邊翻回來蓋上（轉軸在左、進度倒過來）
+      drag = { dir, rev, ctl: flipSheet(host, snap, rev ? -dir : dir, parts && parts.back), w: snap.rect.width || host.clientWidth };
       flipDrag.active = true;
     }
     const p = (drag.dir > 0 ? -dx : dx) / (drag.w * 0.9);
-    drag.ctl.set(p); drag.p = p; drag.lastX = e.clientX; drag.lastT = performance.now();
+    drag.ctl.set(drag.rev ? 1 - p : p); drag.p = p; drag.lastX = e.clientX; drag.lastT = performance.now();
   });
   const end = (e) => {
     n = Math.max(0, n - 1);
@@ -2926,12 +2930,12 @@ function flipDrag(host, o) {
     const d = drag; drag = null;
     const dt = Math.max(1, performance.now() - st.t), v = Math.abs((e.clientX - st.x) / dt); reset();
     const complete = (d.p || 0) > 0.3 || (v > 0.6 && (d.p || 0) > 0.05);
-    d.ctl.finish(complete).then(() => { if (!complete) o.cleanup(); });
-    if (complete) o.commit(d.dir);
+    const pr = complete ? o.commit(d.dir) : null; // 換頁跟翻頁同時進行；墊底等翻完、新頁也好了才拿掉
+    d.ctl.finish(d.rev ? !complete : complete).then(async () => { if (pr) { try { await pr; } catch (_) {} } o.cleanup(); });
     setTimeout(() => { flipDrag.active = false; }, 0);
   };
   host.addEventListener('pointerup', end);
-  host.addEventListener('pointercancel', (e) => { n = Math.max(0, n - 1); if (drag) { const d = drag; drag = null; d.ctl.finish(false).then(() => o.cleanup()); flipDrag.active = false; } reset(); });
+  host.addEventListener('pointercancel', (e) => { n = Math.max(0, n - 1); if (drag) { const d = drag; drag = null; d.ctl.finish(d.rev).then(() => o.cleanup()); flipDrag.active = false; } reset(); });
 }
 flipDrag.active = false;
 // 「確定」：回到拍攝畫面（底色變透明），成品縮小飛進縮圖
@@ -3505,7 +3509,14 @@ function drawCrop() {
     Object.assign(L.style, { display: 'block', left: left + 'px', top: top + 'px', right: '' });
   }
 })();
-const relayout = () => { if (current === 'crop') layoutCrop(); if (current === 'burst') burstLayout(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } };
+const relayout = () => {
+  if (current === 'crop') layoutCrop(); if (current === 'burst') burstLayout();
+  if (current === 'page') {
+    if (adj.open) { fitAdj(); scheduleRegion(); return; }
+    const r = $('#viewStage').getBoundingClientRect(); if (!(r.width > r.height * 1.25)) duo.solo = false; // 轉回直向：取消「只看一頁」
+    if (duoWanted() !== duo.on) renderPage(); else if (duo.on) duoLayout(); else fitView(); // 6.1.2：轉向時切換兩頁／一頁
+  }
+};
 window.addEventListener('resize', relayout);
 /* 6.0.3：iPhone 轉向時 resize 常比畫面真正轉好還早，拿到的還是舊的高度（作者：橫著編輯，照片下半部被工具列切掉）。
    改成直接看裁切區、單頁、連拍畫面的實際大小，變了就重新排版；轉向後再補排一次 */
@@ -3951,17 +3962,19 @@ function renameDoc() {
     i.focus(); // 在點擊的同一個動作裡聚焦，iPhone 才會跳出鍵盤
   });
 }
-$('#docMore').onclick = () => openSheet(`<h3>文件</h3>
+$('#docMore').onclick = async () => { const dd = await DB.get('docs', state.docId); const fr = dd && dd.spreadFirst === 'R'; openSheet(`<h3>文件</h3>
   <button class="srow" data-a="rename">${ICON.edit}<span>重新命名</span></button>
+  <button class="srow" data-a="side">${ICON.book}<span>橫放兩頁：第一頁在${fr ? '右' : '左'}<span class="sub">點一下改成第一頁在${fr ? '左' : '右'}</span></span></button>
   <button class="srow danger" data-a="del">${ICON.trash}<span>刪除整份文件</span></button>`, (s) => {
   s.querySelector('[data-a=rename]').onclick = () => { closeSheet(); renameDoc(); };
+  s.querySelector('[data-a=side]').onclick = () => { closeSheet(); setSpreadFirst(fr ? 'L' : 'R'); }; // 6.1.2
   s.querySelector('[data-a=del]').onclick = async () => {
     closeSheet();
     if (!(await askSheet('確定要刪除這份文件與所有頁面？', '', '刪除', '取消', true))) return;
     await deleteDocs([state.docId]);
     history.back();
   };
-});
+}); };
 $('#docMode').onclick = () => openSheet(`<h3>統一調整</h3><div class="note" style="margin:4px 4px 10px">選一個模式套用到全部頁面，接著可以調整這份文件統一的數值</div>${MODES.map((m) => `<button class="srow" data-m="${m.id}"><span>${m.name}<span class="sub">${modeDesc(m.id)}</span></span></button>`).join('')}`, (s) => {
   s.querySelectorAll('.srow').forEach((b) => b.onclick = async () => {
     closeSheet();
@@ -4003,6 +4016,7 @@ async function renderPage(keepZoom) {
   if (!p) { history.back(); return; }
   const pages = ids;
   viewPage = p; viewIds = ids;
+  { const d = await DB.get('docs', state.docId); duo.first = (d && d.spreadFirst) || 'L'; } // 6.1.2
   setTimeout(() => { if (current === 'page') viewPreload().catch(() => {}); }, 300); // 6.1.1
   $('#pageTitle').textContent = `第 ${state.pageIndex + 1} / ${pages.length} 頁`;
   $('#prevBtn').style.visibility = state.pageIndex > 0 ? 'visible' : 'hidden';
@@ -4010,7 +4024,9 @@ async function renderPage(keepZoom) {
   const img = $('#viewImg');
   const src = p.processed || p.original;
   const url = blobUrl('v:' + p.id, src, verOf(p, 'processed'));
-  if (img.getAttribute('src') !== url) {
+  duoShow(duoWanted()); // 6.1.2：橫放兩頁並排
+  if (duo.on) await duoRender(ids, p);
+  else if (img.getAttribute('src') !== url) {
     img.onload = () => {
       const nat = img.naturalWidth + 'x' + img.naturalHeight, ar = img.naturalWidth / img.naturalHeight;
       // 4.1.2：比例幾乎一樣（精修開關前後只差一兩個像素）就保留放大的位置，方便比較
@@ -4061,7 +4077,32 @@ function applyZoom(gesturing) {
   const pts = new Map();
   let g = null, lastTap = 0, swipeStart = null, holdT = null, holdStart = null;
   const pos = (e) => { const r = stage.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  // 6.1.2 兩頁並排：點一頁＝選它；雙擊或雙指＝只看那一頁；快速滑動＝翻頁（跟著手指翻的由 flipDrag 處理）
+  let dT = null, dLast = { t: 0, i: -1 }, dN = 0;
+  const duoHit = (e) => { for (const el of [$('#duoL'), $('#duoR')]) { if (el.style.display === 'none') continue; const r = el.getBoundingClientRect(); if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) return +el.dataset.i; } return -1; };
+  const duoSolo = (i) => { if (i < 0) return; duo.solo = true; state.pageIndex = i; zoom.s = 1; renderPage(); };
   stage.addEventListener('pointerdown', (e) => {
+    if (!duo.on) return;
+    if (e.target.closest('.navarrow')) return;
+    dN++;
+    if (dN === 2) { const i = state.pageIndex; dT = null; duoSolo(i); return; }
+    dT = { x: e.clientX, y: e.clientY };
+  }, true);
+  stage.addEventListener('pointerup', (e) => {
+    if (!duo.on) { dN = 0; return; }
+    dN = Math.max(0, dN - 1);
+    const t = dT; dT = null; if (!t || flipDrag.active || viewFlip.dragged) return;
+    const dx = e.clientX - t.x, dy = e.clientY - t.y;
+    if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) { step(dx < 0 ? 1 : -1); return; }
+    if (Math.hypot(dx, dy) > 8) return;
+    const i = duoHit(e), now = Date.now();
+    if (i >= 0 && dLast.i === i && now - dLast.t < 320) { dLast = { t: 0, i: -1 }; duoSolo(i); return; }
+    dLast = { t: now, i };
+    if (i >= 0 && i !== state.pageIndex) { state.pageIndex = i; history.replaceState({ s: 'page', doc: state.docId, i }, ''); renderPage(true); }
+  }, true);
+  stage.addEventListener('pointercancel', () => { dN = 0; dT = null; }, true);
+  stage.addEventListener('pointerdown', (e) => {
+    if (duo.on) return; // 6.1.2
     if (e.target.closest('.navarrow')) return;
     stage.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, pos(e));
@@ -4073,6 +4114,7 @@ function applyZoom(gesturing) {
       else if (plainReady(viewPage)) { holdStart = p; holdT = setTimeout(plainShow, 320); } // 4.1.2：按住看精修前
       if (now - lastTap < 300) { // 雙擊縮放
         const b = zoom.base;
+        if (zoom.s <= 1 && duo.solo && !adj.open) { duo.solo = false; lastTap = 0; renderPage(); return; } // 6.1.2：只看一頁時雙擊回到兩頁
         if (zoom.s > 1) { zoom.s = 1; } else {
           const ns = 3;
           zoom.x = (p[0] - b.x) - ((p[0] - b.x - zoom.x) / zoom.s) * ns;
@@ -4142,11 +4184,24 @@ function plainHide() {
   const p = viewPage; $('#cmpTag').style.display = 'none';
   if (p) { const img = $('#viewImg'); img.onload = null; img.src = blobUrl('v:' + p.id, p.processed || p.original, verOf(p, 'processed')); }
 }
-/* 6.1.1：單頁畫面跟著手指翻——先把前後一頁的成品讀進來（墊在下面用；只留前後各一頁，離開或換頁就放掉） */
+/* ---------- 6.1.2 單頁畫面：橫放一次顯示兩頁（作者：橫著看時跟樂譜一樣的左右頁）＋翻書動畫 ----------
+   兩頁並排：單頁畫面、畫面比例夠寬（寬 > 高 ×1.25）、沒開調整面板、沒有「只看一頁」時。
+   左右怎麼排看文件的 spreadFirst：'L'（預設，1｜2、3｜4）或 'R'（第一頁單獨在右：　｜1、2｜3）；文件「⋯」選單與兩頁時標題列的按鈕切換。
+   state.pageIndex＝選到的那頁（工具都作用在這頁，加外框；預設右頁）。點一頁＝選它；雙擊或雙指＝只看那一頁（可以放大），雙擊（沒放大時）或返回鍵回到兩頁。
+   翻頁像真的翻書：往後翻＝右頁沿書背往左翻（背面是下一組的左頁），往回翻＝左頁往右翻（背面是上一組的右頁）。
+   直向一頁：往後翻＝這頁沿左邊翻走；往回翻＝上一頁從左邊翻回來蓋上（作者：像真的書）。到頭／到尾不翻，輕輕偏一下彈回 */
 const viewFlip = { pre: new Map(), under: null, dragged: false };
+const duo = { on: false, solo: false, first: 'L', ids: [], s: 0 };
+let viewIds = [];
+const duoWanted = () => { if (current !== 'page' || adj.open || duo.solo) return false; const r = $('#viewStage').getBoundingClientRect(); return r.width > r.height * 1.25 && viewIds.length > 1; };
+const duoSpreadOf = (i) => (duo.first === 'R' ? Math.floor((i + 1) / 2) : Math.floor(i / 2));
+const duoPair = (s) => { const L = duo.first === 'R' ? 2 * s - 1 : 2 * s; return [L, L + 1].map((i) => (i >= 0 && i < viewIds.length ? i : -1)); };
+const duoHas = (s) => s >= 0 && duoPair(s).some((i) => i >= 0);
 async function viewPreload() {
   const { ids } = await docPageIds(state.docId);
-  const want = [ids[state.pageIndex - 1], ids[state.pageIndex + 1]].filter(Boolean);
+  let want;
+  if (duo.on) { const s = duoSpreadOf(state.pageIndex); want = [...duoPair(s - 1), ...duoPair(s + 1)].filter((i) => i >= 0).map((i) => ids[i]); }
+  else want = [ids[state.pageIndex - 1], ids[state.pageIndex + 1]].filter(Boolean);
   for (const [id, v] of viewFlip.pre) if (!want.includes(id)) { URL.revokeObjectURL(v.url); viewFlip.pre.delete(id); }
   for (const id of want) {
     if (viewFlip.pre.has(id)) continue;
@@ -4154,42 +4209,157 @@ async function viewPreload() {
     const b = p.processed || p.original; if (!b) continue;
     const url = URL.createObjectURL(b), im = new Image(); im.src = url;
     try { await im.decode(); } catch (_) { URL.revokeObjectURL(url); continue; }
-    if (!(ids.includes(id))) { URL.revokeObjectURL(url); continue; }
-    viewFlip.pre.set(id, { url, w: im.naturalWidth, h: im.naturalHeight, key: verOf(p, 'processed') });
+    viewFlip.pre.set(id, { url, im, w: im.naturalWidth, h: im.naturalHeight });
   }
 }
 function viewPreDrop() { for (const v of viewFlip.pre.values()) URL.revokeObjectURL(v.url); viewFlip.pre.clear(); }
 function viewUnderClean() { if (viewFlip.under) { viewFlip.under.remove(); viewFlip.under = null; } }
-let viewIds = [];
+// 一張圖畫成指定位置大小的快照（翻頁的紙用）
+function snapImg(im, rect) {
+  const dpr = Math.min(2, window.devicePixelRatio || 1), c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(rect.width * dpr)); c.height = Math.max(1, Math.round(rect.height * dpr));
+  const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+  try { x.drawImage(im, 0, 0, c.width, c.height); } catch (_) {}
+  return { canvas: c, rect };
+}
+// 單頁的位置（跟 fitView 一樣）
+function fitRect(w, h) {
+  const st = $('#viewStage').getBoundingClientRect(), pad = 14, sc = Math.min((st.width - pad * 2) / w, (st.height - pad * 2) / h);
+  const W = w * sc, H = h * sc;
+  return { left: st.left + (st.width - W) / 2, top: st.top + (st.height - H) / 2, width: W, height: H };
+}
+// 兩頁的位置：書背在正中間，兩頁同高
+function duoRects(arL, arR) {
+  const st = $('#viewStage').getBoundingClientRect(), pad = 14, half = st.width / 2 - pad;
+  const a = arL || arR || 0.71, b = arR || arL || 0.71;
+  const H = Math.min(st.height - pad * 2, half / a, half / b), cx = st.left + st.width / 2, top = st.top + (st.height - H) / 2;
+  return [{ left: cx - H * a, top, width: H * a, height: H }, { left: cx, top, width: H * b, height: H }];
+}
+const imgAr = (el) => (el && el.naturalWidth ? el.naturalWidth / el.naturalHeight : 0);
+function duoLayout() {
+  const L = $('#duoL'), R = $('#duoR'), st = $('#viewStage').getBoundingClientRect();
+  const [rl, rr] = duoRects(imgAr(L.style.display !== 'none' ? L : null), imgAr(R.style.display !== 'none' ? R : null));
+  for (const [el, r] of [[L, rl], [R, rr]]) Object.assign(el.style, { left: r.left - st.left + 'px', top: r.top - st.top + 'px', width: r.width + 'px', height: r.height + 'px' });
+}
+// 兩頁並排的畫面（renderPage 呼叫；p＝選到的那頁）
+async function duoRender(ids, p) {
+  duo.ids = ids; duo.s = duoSpreadOf(state.pageIndex);
+  const [iL, iR] = duoPair(duo.s), L = $('#duoL'), R = $('#duoR');
+  const pp = await Promise.all([iL, iR].map((i) => (i >= 0 ? (i === state.pageIndex ? p : DB.get('pages', ids[i])) : null)));
+  const keep = pp.filter(Boolean).map((q) => q.id);
+  for (const [k, v] of urlCache) if ((k.startsWith('v:') || k.startsWith('plain:')) && !keep.includes(k.slice(k.indexOf(':') + 1))) { URL.revokeObjectURL(v.url); urlCache.delete(k); }
+  const loads = [[L, pp[0]], [R, pp[1]]].map(([el, q]) => new Promise((res) => {
+    el.classList.toggle('sel', !!q && q.id === p.id);
+    if (!q) { el.style.display = 'none'; el.removeAttribute('src'); res(); return; }
+    el.style.display = ''; el.dataset.i = ids.indexOf(q.id);
+    const url = blobUrl('v:' + q.id, q.processed || q.original, verOf(q, 'processed'));
+    if (el.getAttribute('src') === url && el.complete) { res(); return; }
+    el.onload = el.onerror = () => res(); el.src = url;
+  }));
+  ensureFresh(pp.filter(Boolean));
+  await Promise.all(loads);
+  duoLayout();
+  const nums = [iL, iR].filter((i) => i >= 0).map((i) => i + 1);
+  $('#pageTitle').textContent = `第 ${nums.join('–')} / ${ids.length} 頁`;
+  $('#prevBtn').style.visibility = duoHas(duo.s - 1) ? 'visible' : 'hidden';
+  $('#nextBtn').style.visibility = duoHas(duo.s + 1) ? 'visible' : 'hidden';
+}
+function duoShow(on) {
+  duo.on = on;
+  $('#page').classList.toggle('duo', on);
+  $('#viewDuo').style.display = on ? '' : 'none';
+  $('#viewImg').style.visibility = on ? 'hidden' : '';
+  $('#duoSide').style.display = on ? '' : 'none';
+  $('#duoSide').textContent = duo.first === 'R' ? '第一頁在右' : '第一頁在左';
+}
+// 到頭／到尾：輕輕偏一下再彈回
+function viewBounce(d) {
+  const el = duo.on ? $('#viewDuo') : $('#viewImg');
+  if (!flipOn()) return;
+  el.animate([{ translate: '0 0' }, { translate: `${-d * 22}px 0` }, { translate: '0 0' }], { duration: 320, easing: 'cubic-bezier(.3,.7,.4,1)' });
+}
+// 翻頁需要的東西：dir＝1 往後、-1 往回；回傳 { snap 翻的那張, back 背面圖, rev 是否「從左邊翻回來蓋上」, under 墊底元素 } 或 null（還沒讀好）
+function viewFlipParts(dir) {
+  const st = $('#viewStage');
+  if (duo.on) {
+    const s = duo.s + dir; if (!duoHas(s)) return null;
+    const [nL, nR] = duoPair(s).map((i) => (i >= 0 ? viewFlip.pre.get(viewIds[i]) : null));
+    const need = duoPair(s).map((i, k) => (i >= 0 ? (k ? nR : nL) : true)); if (need.some((x) => !x)) return null;
+    const curL = $('#duoL'), curR = $('#duoR');
+    const fl = dir > 0 ? curR : curL; // 翻的那張
+    if (fl.style.display === 'none' || !fl.naturalWidth) {
+      // 這一邊是空的（第一組左邊或最後一組右邊）：用一張白紙翻
+      const r = (dir > 0 ? duoRects(imgAr(curL), 0)[1] : duoRects(0, imgAr(curR))[0]);
+      const c = document.createElement('canvas'); c.width = 8; c.height = 8; c.getContext('2d').fillStyle = '#FBF8F3'; c.getContext('2d').fillRect(0, 0, 8, 8);
+      var snap = { canvas: c, rect: r };
+    } else snap = snapCanvases(fl, [fl]);
+    const backP = dir > 0 ? nL : nR, back = backP && backP !== true ? backP.im : null;
+    // 墊底：往後翻＝左邊先留著目前的左頁、右邊放下一組的右頁；往回翻＝左邊放上一組的左頁、右邊留著目前的右頁
+    const under = document.createElement('div'); Object.assign(under.style, { position: 'absolute', inset: 0, zIndex: 15, pointerEvents: 'none' });
+    const sr = st.getBoundingClientRect(), [rl, rr] = duoRects(nL && nL !== true ? nL.w / nL.h : 0, nR && nR !== true ? nR.w / nR.h : 0);
+    const put = (src, r, isImg) => { if (!src) return; const el = isImg ? new Image() : src; if (isImg) el.src = src; Object.assign(el.style, { position: 'absolute', left: r.left - sr.left + 'px', top: r.top - sr.top + 'px', width: r.width + 'px', height: r.height + 'px', background: '#fff', boxShadow: '0 4px 22px rgba(58,40,30,.25)' }); under.appendChild(el); };
+    if (dir > 0) { if (curL.style.display !== 'none' && curL.naturalWidth) put(snapCanvases(curL, [curL]).canvas, curL.getBoundingClientRect(), false); if (nR && nR !== true) put(nR.url, rr, true); }
+    else { if (nL && nL !== true) put(nL.url, rl, true); if (curR.style.display !== 'none' && curR.naturalWidth) put(snapCanvases(curR, [curR]).canvas, curR.getBoundingClientRect(), false); }
+    return { snap, back, rev: false, under };
+  }
+  const i = state.pageIndex + dir; if (i < 0 || i >= viewIds.length) return null;
+  const v = viewFlip.pre.get(viewIds[i]); if (!v) return null;
+  const img = $('#viewImg'); if (!img.naturalWidth) return null;
+  if (dir > 0) { // 往後：這頁翻走，下面是下一頁
+    const under = new Image(); under.src = v.url; const r = fitRect(v.w, v.h), sr = st.getBoundingClientRect();
+    Object.assign(under.style, { position: 'absolute', left: r.left - sr.left + 'px', top: r.top - sr.top + 'px', width: r.width + 'px', height: r.height + 'px', zIndex: 15, background: '#fff', boxShadow: '0 4px 22px rgba(58,40,30,.25)', pointerEvents: 'none' });
+    return { snap: snapCanvases(img, [img]), back: null, rev: false, under };
+  }
+  // 往回：上一頁從左邊翻回來蓋住這頁（墊底留著目前這頁的快照，蓋好才拿掉）
+  const cur = snapCanvases(img, [img]), sr = st.getBoundingClientRect(), under = cur.canvas;
+  Object.assign(under.style, { position: 'absolute', left: cur.rect.left - sr.left + 'px', top: cur.rect.top - sr.top + 'px', width: cur.rect.width + 'px', height: cur.rect.height + 'px', zIndex: 15, background: '#fff', boxShadow: '0 4px 22px rgba(58,40,30,.25)', pointerEvents: 'none' });
+  return { snap: snapImg(v.im, fitRect(v.w, v.h)), back: null, rev: true, under };
+}
+function viewCommit(dir) {
+  if (duo.on) { const [iL, iR] = duoPair(duo.s + dir); state.pageIndex = iR >= 0 ? iR : iL; }
+  else state.pageIndex += dir;
+  zoom.s = 1; history.replaceState({ s: 'page', doc: state.docId, i: state.pageIndex }, '');
+  return renderPage().then(() => new Promise((r) => { const img = duo.on ? $('#duoR') : $('#viewImg'); if (img.complete) setTimeout(r, 40); else { img.addEventListener('load', () => setTimeout(r, 40), { once: true }); setTimeout(r, 1500); } }));
+}
 flipDrag($('#viewStage'), {
   ready: () => current === 'page' && !adj.open && zoom.s === 1,
-  canFlip: (d) => { const i = state.pageIndex + d; return i >= 0 && i < viewIds.length; },
-  under: (d) => {
-    const id = viewIds[state.pageIndex + d], v = id && viewFlip.pre.get(id); if (!v) return null;
-    const st = $('#viewStage').getBoundingClientRect(), pad = 14, sc = Math.min((st.width - pad * 2) / v.w, (st.height - pad * 2) / v.h);
-    const w = v.w * sc, h = v.h * sc, el = document.createElement('img');
-    el.src = v.url; Object.assign(el.style, { position: 'absolute', left: (st.width - w) / 2 + 'px', top: (st.height - h) / 2 + 'px', width: w + 'px', height: h + 'px', zIndex: 15, background: '#fff', boxShadow: '0 4px 22px rgba(58,40,30,.25)', pointerEvents: 'none' });
-    viewUnderClean(); $('#viewStage').appendChild(el); viewFlip.under = el; viewFlip.dragged = true;
-    return el;
+  canFlip: (d) => {
+    const ok = duo.on ? duoHas(duo.s + d) : state.pageIndex + d >= 0 && state.pageIndex + d < viewIds.length;
+    if (!ok) { viewBounce(d); viewFlip.dragged = true; setTimeout(() => { viewFlip.dragged = false; }, 400); }
+    return ok;
   },
-  snap: () => { const img = $('#viewImg'); return img.naturalWidth ? snapCanvases(img, [img]) : null; },
-  commit: (d) => {
-    state.pageIndex += d; zoom.s = 1; history.replaceState({ s: 'page', doc: state.docId, i: state.pageIndex }, '');
-    const img = $('#viewImg'), u = viewFlip.under;
-    renderPage().then(() => { const rm = () => { if (viewFlip.under === u) viewUnderClean(); }; if (img.complete) setTimeout(rm, 60); else { img.addEventListener('load', rm, { once: true }); setTimeout(rm, 1500); } });
-    setTimeout(() => { viewFlip.dragged = false; }, 0);
-  },
+  parts: (d) => viewFlipParts(d),
+  under: (d, parts) => { viewUnderClean(); $('#viewStage').appendChild(parts.under); viewFlip.under = parts.under; viewFlip.dragged = true; return parts.under; },
+  snap: (d, parts) => parts.snap,
+  commit: (d) => { setTimeout(() => { viewFlip.dragged = false; }, 0); return viewCommit(d); },
   cleanup: () => { viewUnderClean(); viewFlip.dragged = false; },
 });
 function step(d) {
-  // 6.1：翻頁加上翻書動畫（目前這頁拍成快照翻過去，下面換成新的頁）
-  const img = $('#viewImg'), snap = flipOn() && !adj.open && img.naturalWidth ? snapCanvases(img, [img]) : null;
-  state.pageIndex += d; zoom.s = 1; renderPage(); history.replaceState({ s: 'page', doc: state.docId, i: state.pageIndex }, '');
-  if (snap) bookFlip($('#viewStage'), snap, d);
+  // 按箭頭、快速滑動：自動翻（6.1.2 到頭／到尾彈回，作者：到底了還能翻、翻完還是同一頁）
+  const ok = duo.on ? duoHas(duo.s + d) : state.pageIndex + d >= 0 && state.pageIndex + d < viewIds.length;
+  if (!ok) { viewBounce(d); return; }
+  const parts = flipOn() && !adj.open ? viewFlipParts(d) : null;
+  if (!parts) { // 前後頁還沒讀好、或不播動畫：直接換（往後翻還是可以用目前這頁翻走）
+    if (flipOn() && !adj.open && !duo.on && d > 0) { const img = $('#viewImg'); if (img.naturalWidth) { const snap = snapCanvases(img, [img]); viewCommit(d); bookFlip($('#viewStage'), snap, 1); return; } }
+    viewCommit(d); return;
+  }
+  viewUnderClean(); $('#viewStage').appendChild(parts.under); viewFlip.under = parts.under;
+  const sheet = flipSheet($('#viewStage'), parts.snap, parts.rev ? -d : d, parts.back);
+  if (parts.rev) sheet.set(1);
+  const pr = viewCommit(d), u = parts.under;
+  sheet.finish(!parts.rev, 700).then(async () => { try { await pr; } catch (_) {} if (viewFlip.under === u) viewUnderClean(); });
 }
 $('#prevBtn').onclick = () => (adj.open && adj.scope === 'doc' ? adjSwitch(-1) : step(-1));
 $('#nextBtn').onclick = () => (adj.open && adj.scope === 'doc' ? adjSwitch(1) : step(1));
-$('#pageBack').onclick = () => history.back();
+$('#pageBack').onclick = () => { if (duo.solo && !adj.open) { const r = $('#viewStage').getBoundingClientRect(); if (r.width > r.height * 1.25) { duo.solo = false; renderPage(); return; } } history.back(); }; // 6.1.2：只看一頁時先回到兩頁
+// 6.1.2：兩頁並排的第一頁在左／右（每份文件各自記住）
+async function setSpreadFirst(v) {
+  const d = await DB.get('docs', state.docId); if (!d) return;
+  d.spreadFirst = v; await DB.put('docs', d); duo.first = v;
+  toast(v === 'R' ? '橫放兩頁時，第一頁放在右邊' : '橫放兩頁時，第一頁放在左邊');
+  if (current === 'page') renderPage(true);
+}
+$('#duoSide').onclick = () => setSpreadFirst(duo.first === 'R' ? 'L' : 'R');
 async function updatePage(patch) {
   const p = await DB.get('pages', viewPage.id);
   pushHist(p);
@@ -5539,6 +5709,7 @@ const CHANGELOG = [
     { t: '新增雙頁模式：攤開的書拍一張，自動拆成左右兩頁', since: '6.0' },
     { t: '即時掃描也支援雙頁模式', since: '6.1' },
     { t: '翻頁加上翻書動畫', since: '6.1' },
+    { t: '手機橫放時可一次顯示兩頁，並可設定左頁及右頁顯示', since: '6.1.2' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
