@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.0.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.0.3'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -801,6 +801,26 @@ function burstLayout() {
   const w = Math.max(1, Math.min(r.width - 2 * m, (r.height - 2 * m) * ar)), h = w / ar;
   Object.assign($('#burstPw').style, { left: (r.width - w) / 2 + 'px', top: (r.height - h) / 2 + 'px', width: w + 'px', height: h + 'px' });
 }
+// 6.0.3：頁面範圍（含彎曲點）的外框，留 2% 邊；佔照片 6 成以上就用整張（跟原本一樣）。回傳換算到這個範圍的四角／彎曲點
+function pageRegion(C, curve) {
+  const pts = C.concat(curve ? curve.flat() : []);
+  const m = 0.02, x0 = Math.max(0, Math.min(...pts.map((q) => q[0])) - m), y0 = Math.max(0, Math.min(...pts.map((q) => q[1])) - m);
+  const x1 = Math.min(1, Math.max(...pts.map((q) => q[0])) + m), y1 = Math.min(1, Math.max(...pts.map((q) => q[1])) + m);
+  if ((x1 - x0) * (y1 - y0) > 0.6) return { x0: 0, y0: 0, w: 1, h: 1, corners: C, curve: curve || null };
+  const w = x1 - x0, h = y1 - y0, f = (q) => [(q[0] - x0) / w, (q[1] - y0) / h];
+  return { x0, y0, w, h, corners: C.map(f), curve: curve ? curve.map((e) => e.map(f)) : null };
+}
+// 只畫出照片的一塊（整張照片畫上去、超出畫布的部分不畫：iPhone 只取局部時可能沒套用照片方向，整張畫才正確）
+function regionFrame(src, rg, maxSide) {
+  if (rg.w === 1 && rg.h === 1) return smallFrame(src, maxSide);
+  const [W, H] = sourceSize(src), rw = W * rg.w, rh = H * rg.h, s = Math.min(1, maxSide / Math.max(rw, rh));
+  const cw = Math.max(1, Math.round(rw * s)), ch = Math.max(1, Math.round(rh * s));
+  const c = canvasOf(cw, ch), ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(src, -rg.x0 * W * s, -rg.y0 * H * s, W * s, H * s);
+  const d = ctx.getImageData(0, 0, cw, ch); c.width = c.height = 0;
+  return d;
+}
 async function burstShow(p, anim) {
   const pw = $('#burstPw'), base = pw.querySelector('.cr-base'), outC = pw.querySelector('.cr-out');
   const clip = pw.querySelector('.cr-clip'), band = pw.querySelector('.cr-band'), spin = $('#burstSpin');
@@ -811,8 +831,10 @@ async function burstShow(p, anim) {
   try {
     await whenReady();
     const { img, url } = await loadImg(p.original);
-    const f0 = anim ? smallFrame(img, 900) : null, f1 = smallFrame(img, 2000); URL.revokeObjectURL(url);
-    const job = (f, mode, params) => wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners: p.corners, curve: p.curve || null, upscale: 'off', rotation: p.rotation || 0, mode, params }, [f.data.buffer]);
+    // 6.0.3：頁面只佔照片一部分（雙頁的一頁約一半）時，先只取這一頁的範圍再縮，成品才夠清楚（作者：雙頁的大圖不夠清晰）
+    const rg = pageRegion(p.corners, p.curve);
+    const f0 = anim ? regionFrame(img, rg, 900) : null, f1 = regionFrame(img, rg, 2000); URL.revokeObjectURL(url);
+    const job = (f, mode, params) => wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners: rg.corners, curve: rg.curve, upscale: 'off', rotation: p.rotation || 0, mode, params }, [f.data.buffer]);
     if (anim) {
       const r0 = await job(f0, 'original', fillAdj('original'));
       if (!alive()) return;
@@ -3123,7 +3145,20 @@ function drawCrop() {
     Object.assign(L.style, { display: 'block', left: left + 'px', top: top + 'px', right: '' });
   }
 })();
-window.addEventListener('resize', () => { if (current === 'crop') layoutCrop(); if (current === 'burst') burstLayout(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } });
+const relayout = () => { if (current === 'crop') layoutCrop(); if (current === 'burst') burstLayout(); if (current === 'page') { if (adj.open) { fitAdj(); scheduleRegion(); } else fitView(); } };
+window.addEventListener('resize', relayout);
+/* 6.0.3：iPhone 轉向時 resize 常比畫面真正轉好還早，拿到的還是舊的高度（作者：橫著編輯，照片下半部被工具列切掉）。
+   改成直接看裁切區、單頁、連拍畫面的實際大小，變了就重新排版；轉向後再補排一次 */
+if (window.ResizeObserver) {
+  const seen = new Map();
+  const ro = new ResizeObserver((es) => {
+    let ch = false;
+    for (const e of es) { const r = e.contentRect, k = Math.round(r.width) + 'x' + Math.round(r.height); if (seen.get(e.target) !== k) { seen.set(e.target, k); ch = true; } }
+    if (ch) requestAnimationFrame(relayout);
+  });
+  ['#cropStage', '#viewStage', '#burstStage'].forEach((q) => ro.observe($(q)));
+}
+window.addEventListener('orientationchange', () => { setTimeout(relayout, 350); setTimeout(relayout, 800); });
 $('#cropFull').onclick = () => {
   cropCtx.corners = FULL.map((p) => p.slice());
   cropCtx.curve = cropCtx.curveMode ? straightCurve(cropCtx.corners) : null;
@@ -3856,6 +3891,8 @@ async function adjSwitch(d) {
   adjPrepare(pj);
 }
 function fitAdj() {
+  // 6.0.3：橫向時拉桿是直的（轉 90 度），長度跟著右邊那欄的高度
+  const one = $('#adjPanel .adjone'); if (one) { const hh = one.getBoundingClientRect().height; one.style.setProperty('--sl', Math.max(120, hh - 64) + 'px'); }
   if (!adj.pw) return;
   const st = $('#viewStage').getBoundingClientRect();
   const pad = 10;
