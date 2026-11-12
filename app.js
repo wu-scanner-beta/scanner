@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.1.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -821,11 +821,39 @@ function regionFrame(src, rg, maxSide) {
   const d = ctx.getImageData(0, 0, cw, ch); c.width = c.height = 0;
   return d;
 }
+// 6.1.1：雙頁的兩頁成品先做好放著（翻到另一頁時立刻出現，跟著手指翻時墊在下面）；只留這一對
+burst.cache = new Map();
+const burstKey = (p) => p.id + procKey(p);
+function burstCacheKeep() { const pr = burstPair() || []; for (const k of [...burst.cache.keys()]) if (!pr.some((id) => k.startsWith(id))) { const c = burst.cache.get(k); c.width = c.height = 0; burst.cache.delete(k); } }
+function burstCacheSet(p, c) { for (const k of [...burst.cache.keys()]) if (k.startsWith(p.id)) { const o = burst.cache.get(k); if (o !== c) { o.width = o.height = 0; } burst.cache.delete(k); } burst.cache.set(burstKey(p), c); } // 同一頁只留最新的
+const copyCanvas = (src) => { const c = document.createElement('canvas'); c.width = src.width; c.height = src.height; c.getContext('2d').drawImage(src, 0, 0); return c; };
+async function burstPrerender() {
+  const pr = burstPair(); if (!pr) return;
+  for (const id of pr) {
+    const p = await DB.get('pages', id); if (!p || burst.cache.has(burstKey(p))) continue;
+    try {
+      await whenReady();
+      const { img, url } = await loadImg(p.original);
+      const rg = pageRegion(p.corners, p.curve), f = regionFrame(img, rg, 2000); URL.revokeObjectURL(url);
+      const r = await wcall('process', { buffer: f.data.buffer, width: f.width, height: f.height, corners: rg.corners, curve: rg.curve, upscale: 'off', rotation: p.rotation || 0, mode: p.mode, params: pageAdjOf(p) }, [f.data.buffer]);
+      if (!burstPair() || !burstPair().includes(id)) return;
+      const c = document.createElement('canvas'); drawTo(c, r); burstCacheSet(p, c);
+    } catch (e) { console.warn('預先處理', e); }
+  }
+}
 async function burstShow(p, anim) {
   const pw = $('#burstPw'), base = pw.querySelector('.cr-base'), outC = pw.querySelector('.cr-out');
   const clip = pw.querySelector('.cr-clip'), band = pw.querySelector('.cr-band'), spin = $('#burstSpin');
   const tok = ++burst.tok; if (burst.sw) { burst.sw.stop(); burst.sw = null; }
   const alive = () => tok === burst.tok;
+  burstCacheKeep();
+  const cached = !anim && burst.cache.get(burstKey(p));
+  if (cached) { // 6.1.1：做好的直接畫
+    outC.width = cached.width; outC.height = cached.height; outC.getContext('2d').drawImage(cached, 0, 0);
+    base.width = base.height = 1; burst.ar = cached.width / cached.height; burstLayout();
+    clip.style.clipPath = 'none'; clip.style.opacity = ''; band.style.display = 'none'; pw.style.visibility = 'visible'; spin.classList.remove('on');
+    return;
+  }
   pw.style.visibility = 'hidden'; bandInit(band); clip.style.opacity = ''; clip.style.transition = ''; spin.classList.add('on');
   pauseQueue(); // 先讓成品出來，背景的整頁處理稍後再跑
   try {
@@ -845,6 +873,7 @@ async function burstShow(p, anim) {
     const r = await job(f1, p.mode, pageAdjOf(p));
     if (!alive()) return;
     drawTo(outC, r); spin.classList.remove('on');
+    if (burstPair()) { burstCacheSet(p, copyCanvas(outC)); setTimeout(() => burstPrerender(), 300); } // 6.1.1
     if (!anim) {
       base.width = base.height = 1; burst.ar = r.width / r.height; burstLayout();
       clip.style.clipPath = 'none'; band.style.display = 'none'; pw.style.visibility = 'visible'; return;
@@ -881,6 +910,29 @@ function burstFlip(i) {
   if (snap) bookFlip($('#burstStage'), snap, dir);
 }
 $('#burstDots').querySelectorAll('button').forEach((b, i) => b.onclick = () => burstFlip(i));
+// 6.1.1：連拍畫面跟著手指翻（另一頁已經做好才跟手指；沒做好就放開時照原本的方式翻）
+burst.under = null;
+const burstUnderClean = () => { if (burst.under) { burst.under.remove(); burst.under = null; } burst.dragged = false; };
+flipDrag($('#burstStage'), {
+  ready: () => current === 'burst' && !!burstPair(),
+  canFlip: (d) => { const pr = burstPair(); if (!pr) return false; const i = pr.indexOf(burstViewId()) + d; return i >= 0 && i < 2; },
+  under: (d) => {
+    const pr = burstPair(), id = pr[pr.indexOf(burstViewId()) + d];
+    const k = [...burst.cache.keys()].find((x) => x.startsWith(id)), c = k && burst.cache.get(k); if (!c) return null;
+    const r = $('#burstStage').getBoundingClientRect(), m = 18, ar = c.width / c.height;
+    const w = Math.max(1, Math.min(r.width - 2 * m, (r.height - 2 * m) * ar)), h = w / ar;
+    const el = copyCanvas(c); Object.assign(el.style, { position: 'absolute', left: (r.width - w) / 2 + 'px', top: (r.height - h) / 2 + 'px', width: w + 'px', height: h + 'px', zIndex: 15, pointerEvents: 'none', background: '#fff' });
+    burstUnderClean(); $('#burstStage').appendChild(el); burst.under = el; burst.dragged = true;
+    return el;
+  },
+  snap: () => { const pw = $('#burstPw'); return snapCanvases(pw, [...pw.querySelectorAll('canvas')]); },
+  commit: (d) => {
+    const pr = burstPair(); burst.viewId = pr[pr.indexOf(burstViewId()) + d];
+    const u = burst.under; renderBurst().then(() => setTimeout(() => { if (burst.under === u) { burst.under.remove(); burst.under = null; } }, 80));
+    setTimeout(() => { burst.dragged = false; }, 0);
+  },
+  cleanup: burstUnderClean,
+});
 {
   let sx = null, sy = 0;
   const st = $('#burstStage');
@@ -888,6 +940,7 @@ $('#burstDots').querySelectorAll('button').forEach((b, i) => b.onclick = () => b
   st.addEventListener('pointerup', (e) => {
     if (sx === null) return;
     const dx = e.clientX - sx, dy = e.clientY - sy; sx = null;
+    if (flipDrag.active || burst.dragged) return; // 6.1.1：跟著手指翻的已經處理了
     const pr = burstPair(); if (!pr || Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
     burstFlip(dx < 0 ? 1 : 0); // 往左滑看右頁、往右滑看左頁
   });
@@ -1466,11 +1519,12 @@ function quadHalves(q, g) {
   const [gt, gb] = g || [mid(q[0], q[1]), mid(q[3], q[2])];
   return [[q[0], gt, gb, q[3]], [gt, q[1], q[2], gb]].map((h) => h.map((p) => p.slice()));
 }
-function drawSpreadLine(ctx, R, q, a) {
+// 6.1.1：跟外框同色的虛線（作者：白色跟綠框不搭）；還沒找到書溝時淡一點，找到後跟外框一樣深
+function drawSpreadLine(ctx, R, q, a, color) {
   const g = gutterFor(live.lockQ || q), mid = (p, r) => [(p[0] + r[0]) / 2, (p[1] + r[1]) / 2];
   const [t, b] = g || [mid(q[0], q[1]), mid(q[3], q[2])];
-  ctx.save(); ctx.globalAlpha = a; ctx.lineWidth = g ? 2.5 : 2; ctx.strokeStyle = g ? '#FFFFFF' : 'rgba(255,255,255,.75)';
-  if (!g) ctx.setLineDash([8, 7]);
+  ctx.save(); ctx.globalAlpha = a * (g ? 1 : 0.5); ctx.lineWidth = g ? 3 : 2.5; ctx.strokeStyle = color || '#A8D4A1'; ctx.lineCap = 'round';
+  ctx.setLineDash([9, 7]);
   ctx.beginPath(); ctx.moveTo(R.x + t[0] * R.w, R.y + t[1] * R.h); ctx.lineTo(R.x + b[0] * R.w, R.y + b[1] * R.h); ctx.stroke(); ctx.restore();
 }
 function teedWanted(now) {
@@ -1842,7 +1896,7 @@ function drawOverlay() {
     ctx.fillStyle = '#fff';
     pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill(); });
     ctx.globalAlpha = 1;
-    if (settings.spread) drawSpreadLine(ctx, R, live.shown, live.fade); // 6.1：書溝線（還沒找到時畫中間虛線）
+    if (settings.spread) drawSpreadLine(ctx, R, live.shown, live.fade, ctx.strokeStyle); // 6.1：書溝線（還沒找到時畫中間虛線）
     // 5.1 聚焦：框的中央一個圓環跟著穩定進度填滿，填滿就拍（拍攝動畫關閉時不畫）
     if (settings.autoShutter && live.armed && !live.edge && pr > 0 && animOn()) centerRing(ctx, [pts.reduce((a, p) => a + p[0], 0) / 4, pts.reduce((a, p) => a + p[1], 0) / 4], pr, null, gold ? '#FFC828' : '#7ED67E', live.fade);
   }
@@ -1903,7 +1957,7 @@ async function capture(sig, full, quadAt, userPress) {
   const fxOn = animOn(), now2crop = !settings.cropLater;
   const fxFrame = fxOn ? fxGrab(full || v) : null;
   let fx = null;
-  const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop ? (settings.autoAI ? 'ai' : 'crop') : false); };
+  const startFx = () => { if (fxFrame) fx = playCapFx(fxFrame, quad || FULL, now2crop ? (settings.autoAI ? 'ai' : 'crop') : false, settings.spread ? { g: spGut } : null); };
   // 3.1.4：稍後裁切有動畫時，存照片（12 MP 轉 JPEG）、精算四角、存資料庫這些重活等紙飛進縮圖後才做。
   // 作者錄影：動畫在掃描光那段一頓一頓、飛進縮圖幾乎跳過——這些工作在主畫面執行，把動畫卡住。
   // 等待期間按「完成」或切到背景：先把動畫收掉，等這張存好再結束（finishLive）
@@ -2604,7 +2658,7 @@ function bandAtPct(band, p, fade) { band.style.display = 'block'; band.style.tra
 const capFx = { cur: null };
 // frame：拍下那一格；quad：0～1 四角（相對那一格）；stay：立即裁切（掃完停住、掃描光循環，release() 後 ready 才完成）
 // 回傳 { landed（飛進縮圖）, ready（立即裁切可以進框選了）, release(), stop() }
-function playCapFx(frame, quad, stay) {
+function playCapFx(frame, quad, stay, sp) {
   if (capFx.cur) capFx.cur.stop();
   const root = $('#capFx'), dim = root.querySelector('.cf-dim'), pw = root.querySelector('.cf-pw');
   const paper = root.querySelector('.cf-paper'), scan = root.querySelector('.cf-scan'), clip = root.querySelector('.cf-clip'), band = root.querySelector('.cf-band');
@@ -2639,6 +2693,7 @@ function playCapFx(frame, quad, stay) {
   };
   function stop() {
     cancelAnimationFrame(raf); clearTimeout(raf); root.classList.remove('on'); band.style.display = 'none'; band.classList.remove('wait');
+    if (sp && sp.cards) { fxCardsDone(sp.cards); sp.cards = null; } pw.style.opacity = 1; // 6.1.1
     paper.width = paper.height = scan.width = scan.height = 1; // 3.1.1：釋放大張畫布（iPhone 圖層記憶體吃緊時相機畫面會被畫小）
     if (capFx.cur === h) capFx.cur = null;
     if (!landedDone) { landedDone = true; resolveLand(); }
@@ -2668,6 +2723,14 @@ function playCapFx(frame, quad, stay) {
       if (!dinged) { dinged = true; band.classList.remove('wait'); sfxPlay('ding'); }
       if (stay) { band.style.display = 'none'; resolveReady(); return; } // 停在攤平的畫面，等進框選畫面後再 stop()
       band.style.display = 'none';
+      if (sp) { // 6.1.1 雙頁：拆成左右兩張、錯開疊在一起（左頁在前），一起飛進縮圖（作者：讓使用者知道兩頁都進去了）
+        if (!sp.cards) sp.cards = fxCards(pw, rx, ry, rw, rh, quad, sp.g);
+        const tb = $('#liveThumb').getBoundingClientRect(), u = clamp01((t - T.s1) / (T.y1 - T.s1 + 0.25));
+        fxCardsAt(sp.cards, tb, u);
+        dim.style.opacity = 0.82 * (1 - easeIn3(clamp01((u - 0.4) / 0.6)));
+        if (u >= 1) { fxCardsDone(sp.cards); stop(); return; }
+        raf = requestAnimationFrame(frameFn); return;
+      }
       const f = easeIn3(clamp01((t - T.s1) / (T.y1 - T.s1)));
       const tb = $('#liveThumb').getBoundingClientRect(), sc = 1 + (tb.width / rw - 1) * f;
       pw.style.transformOrigin = `${rx}px ${ry}px`;
@@ -2681,6 +2744,37 @@ function playCapFx(frame, quad, stay) {
   raf = requestAnimationFrame(frameFn);
   return h;
 }
+/* 6.1.1 雙頁的拍攝動畫：攤平的整本照書溝切成左右兩張（各一份畫面副本，用 clip 只露出自己那半），
+   前 4 成時間右頁滑到左頁右下方疊好，後 6 成兩張一起縮小飛進縮圖（左頁在前，作者決定） */
+function fxCards(pw, rx, ry, rw, rh, quad, g) {
+  let t = 0.5;
+  if (g) { const d = (a, b) => Math.hypot(b[0] - a[0], b[1] - a[1]); t = Math.max(0.3, Math.min(0.7, d(quad[0], g[0]) / (d(quad[0], quad[1]) || 1))); }
+  const gx = rx + rw * t, rects = [{ x: rx, y: ry, w: gx - rx, h: rh }, { x: gx, y: ry, w: rx + rw - gx, h: rh }];
+  const cards = rects.map((r, i) => {
+    const el = pw.cloneNode(true), src = pw.querySelectorAll('canvas'), dst = el.querySelectorAll('canvas');
+    dst.forEach((c, j) => { c.width = src[j].width; c.height = src[j].height; c.getContext('2d').drawImage(src[j], 0, 0); });
+    const wrap = document.createElement('div');
+    Object.assign(wrap.style, { position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: i === 0 ? 3 : 2, clipPath: `inset(${r.y}px ${innerWidth - r.x - r.w}px ${innerHeight - r.y - r.h}px ${r.x}px)`, transformOrigin: `${r.x}px ${r.y}px`, filter: 'drop-shadow(0 4px 10px rgba(0,0,0,.35))' });
+    wrap.appendChild(el); pw.parentNode.appendChild(wrap);
+    return { wrap, r };
+  });
+  pw.style.opacity = 0;
+  return cards;
+}
+function fxCardsAt(cards, tb, u) {
+  const k1 = easeIO(clamp01(u / 0.4)), k2 = easeIn3(clamp01((u - 0.4) / 0.6));
+  const L = cards[0].r;
+  cards.forEach(({ wrap, r }, i) => {
+    // 疊好的位置：右頁在左頁右下方（錯開左頁寬的 12%、高的 6%）
+    const sx = i ? L.x + L.w * 0.12 : r.x, sy = i ? L.y + L.h * 0.06 : r.y;
+    const s1 = i ? (L.h / r.h) : 1; // 右頁縮成跟左頁一樣高
+    const x1 = r.x + (sx - r.x) * k1, y1 = r.y + (sy - r.y) * k1, sc1 = 1 + (s1 - 1) * k1;
+    const st = tb.height / (L.h * 1.06), tx = tb.left + (i ? L.w * 0.12 * st : 0), ty = tb.top + (i ? L.h * 0.06 * st : 0);
+    const x = x1 + (tx - x1) * k2, y = y1 + (ty - y1) * k2, sc = sc1 + ((i ? st * s1 : st) - sc1) * k2;
+    wrap.style.transform = `translate(${x - r.x}px,${y - r.y}px) scale(${sc})`;
+  });
+}
+function fxCardsDone(cards) { cards.forEach(({ wrap }) => { wrap.querySelectorAll('canvas').forEach((c) => { c.width = c.height = 0; }); wrap.remove(); }); }
 // 縮圖跳一下
 function bumpThumb() { const tb = $('#liveThumb'); tb.classList.remove('bump'); void tb.offsetWidth; tb.classList.add('bump'); }
 
@@ -2697,7 +2791,7 @@ function capResLayout(ar) {
 const CAPRES_HOLD = 400, CAPRES_HOLD_STILL = 1000;
 function showCapResult(pageId) {
   const ids = Array.isArray(pageId) ? pageId : [pageId]; // 6.1 雙頁：左頁 → 翻書翻到右頁
-  pageId = ids[0];
+  pageId = ids[0]; capRes.left = null;
   const el = $('#capRes'), pw = el.querySelector('.cr-pw'), base = el.querySelector('.cr-base'), outC = el.querySelector('.cr-out');
   const clip = el.querySelector('.cr-clip'), band = el.querySelector('.cr-band'), spin = el.querySelector('.cr-spin');
   const anim = animOn();
@@ -2749,6 +2843,7 @@ async function capResNext(pid, isDone) {
   const r = await wcall('process', { buffer: f1.data.buffer, width: f1.width, height: f1.height, corners: rg.corners, curve: rg.curve, upscale: 'off', rotation: p.rotation || 0, mode: p.mode, params: pageAdjOf(p) }, [f1.data.buffer]);
   if (isDone()) return;
   const snap = snapCanvases(pw, [base, outC]); // 左頁的樣子
+  capRes.left = { canvas: copyCanvas(snap.canvas), ar: snap.rect.width / snap.rect.height }; // 6.1.1：收回縮圖時兩頁疊著一起飛
   drawTo(base, r); drawTo(outC, r); capResLayout(r.width / r.height);
   await bookFlip(el.querySelector('.cr-stage'), snap, 1);
 }
@@ -2763,30 +2858,103 @@ function snapCanvases(el, list) {
   for (const s of list) { try { if (s && (s.width > 1 || s.naturalWidth)) x.drawImage(s, 0, 0, c.width, c.height); } catch (_) {} }
   return { canvas: c, rect: r };
 }
-function bookFlip(host, snap, dir) {
-  if (!flipOn() || !snap || !host) return Promise.resolve();
+// 6.1.1：翻頁的紙（作者：iPhone 17 上太快、幾乎看不到）——0.7 秒慢起慢停；翻過一半後顯示紙的背面，整段都看得到。
+// flipSheet 可以跟著手指（set(進度 0～1)），放開時 finish(翻完／彈回)
+function flipSheet(host, snap, dir) {
   const hr = host.getBoundingClientRect(), r = snap.rect;
   const wrap = document.createElement('div');
-  Object.assign(wrap.style, { position: 'absolute', left: r.left - hr.left + 'px', top: r.top - hr.top + 'px', width: r.width + 'px', height: r.height + 'px', zIndex: 20, pointerEvents: 'none', perspective: Math.max(1200, r.width * 3) + 'px' });
+  Object.assign(wrap.style, { position: 'absolute', left: r.left - hr.left + 'px', top: r.top - hr.top + 'px', width: r.width + 'px', height: r.height + 'px', zIndex: 20, pointerEvents: 'none', perspective: Math.max(1400, r.width * 3.2) + 'px' });
   const pg = document.createElement('div');
-  Object.assign(pg.style, { position: 'absolute', inset: 0, transformOrigin: dir > 0 ? '0% 50%' : '100% 50%', backfaceVisibility: 'hidden', webkitBackfaceVisibility: 'hidden', transition: 'transform .45s cubic-bezier(.3,.6,.3,1)', boxShadow: '0 6px 20px rgba(0,0,0,.35)' });
+  Object.assign(pg.style, { position: 'absolute', inset: 0, transformOrigin: dir > 0 ? '0% 50%' : '100% 50%', transformStyle: 'preserve-3d', webkitTransformStyle: 'preserve-3d' });
+  const face = (back) => { const f = document.createElement('div'); Object.assign(f.style, { position: 'absolute', inset: 0, backfaceVisibility: 'hidden', webkitBackfaceVisibility: 'hidden', boxShadow: '0 6px 20px rgba(0,0,0,.3)', overflow: 'hidden' }); if (back) { f.style.transform = 'rotateY(180deg)'; f.style.background = `linear-gradient(to ${dir > 0 ? 'right' : 'left'}, #E9E1D4, #F7F2EA 40%, #FBF8F3)`; } return f; };
+  const front = face(false), back = face(true);
   snap.canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
   const sh = document.createElement('div');
-  Object.assign(sh.style, { position: 'absolute', inset: 0, opacity: 0, transition: 'opacity .45s ease', background: `linear-gradient(to ${dir > 0 ? 'left' : 'right'}, rgba(0,0,0,.5), rgba(0,0,0,0) 65%)` });
-  pg.append(snap.canvas, sh); wrap.appendChild(pg);
+  Object.assign(sh.style, { position: 'absolute', inset: 0, opacity: 0, background: `linear-gradient(to ${dir > 0 ? 'left' : 'right'}, rgba(0,0,0,.45), rgba(0,0,0,0) 70%)` });
+  const shB = document.createElement('div');
+  Object.assign(shB.style, { position: 'absolute', inset: 0, opacity: 0, background: `linear-gradient(to ${dir > 0 ? 'right' : 'left'}, rgba(0,0,0,.3), rgba(0,0,0,0) 60%)` });
+  front.append(snap.canvas, sh); back.appendChild(shB); pg.append(front, back); wrap.appendChild(pg);
   if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
   host.appendChild(wrap);
-  return new Promise((res) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => { pg.style.transform = `rotateY(${dir > 0 ? -180 : 180}deg)`; sh.style.opacity = 1; }));
-    setTimeout(() => { wrap.remove(); snap.canvas.width = snap.canvas.height = 0; res(); }, 480);
-  });
+  let cur = 0;
+  const apply = (p) => {
+    cur = Math.max(0, Math.min(1, p));
+    pg.style.transform = `rotateY(${(dir > 0 ? -180 : 180) * cur}deg)`;
+    sh.style.opacity = Math.min(1, cur * 2); shB.style.opacity = Math.max(0, 1 - (cur - 0.5) * 2);
+  };
+  apply(0);
+  const done = () => { wrap.remove(); snap.canvas.width = snap.canvas.height = 0; };
+  return {
+    set(p) { pg.style.transition = sh.style.transition = shB.style.transition = 'none'; apply(p); },
+    finish(complete, dur) {
+      const to = complete ? 1 : 0, ms = dur || Math.max(180, 700 * Math.abs(to - cur));
+      const tr = `${ms}ms cubic-bezier(.45,.05,.35,1)`;
+      pg.style.transition = `transform ${tr}`; sh.style.transition = shB.style.transition = `opacity ${tr}`;
+      return new Promise((res) => { requestAnimationFrame(() => requestAnimationFrame(() => apply(to))); setTimeout(() => { done(); res(); }, ms + 40); });
+    },
+  };
 }
+function bookFlip(host, snap, dir) {
+  if (!flipOn() || !snap || !host) return Promise.resolve();
+  return flipSheet(host, snap, dir).finish(true, 700);
+}
+/* 6.1.1：跟著手指翻頁（作者要求）。水平拖動 > 12 px 開始：目前的頁拍成快照跟著手指翻，下面先放「要翻到的那頁」（under）；
+   放開時拖超過 3 成或快速甩一下就翻完，否則彈回。opts：canFlip(dir) 那個方向有沒有頁、under(dir) 回傳要墊在下面的元素（沒準備好回傳 null＝不跟手指，放開照原本的方式翻）、
+   snap() 目前的頁、commit(dir) 真的換頁、cleanup() 收掉墊底 */
+function flipDrag(host, o) {
+  let st = null, drag = null, n = 0;
+  const reset = () => { st = null; };
+  host.addEventListener('pointerdown', (e) => { n++; st = n === 1 && flipOn() && o.ready() ? { x: e.clientX, y: e.clientY, t: performance.now() } : null; if (n > 1 && drag) { const d = drag; drag = null; d.ctl.finish(false).then(() => o.cleanup()); } });
+  host.addEventListener('pointermove', (e) => {
+    if (!st) return;
+    const dx = e.clientX - st.x, dy = e.clientY - st.y;
+    if (!drag) {
+      if (Math.abs(dx) < 12 || Math.abs(dx) < Math.abs(dy) * 1.5) { if (Math.abs(dy) > 16) st = null; return; }
+      const dir = dx < 0 ? 1 : -1;
+      if (!o.canFlip(dir)) { st = null; return; }
+      const under = o.under(dir); if (!under) { st = null; return; }
+      const snap = o.snap(); if (!snap) { o.cleanup(); st = null; return; }
+      drag = { dir, ctl: flipSheet(host, snap, dir), w: snap.rect.width || host.clientWidth };
+      flipDrag.active = true;
+    }
+    const p = (drag.dir > 0 ? -dx : dx) / (drag.w * 0.9);
+    drag.ctl.set(p); drag.p = p; drag.lastX = e.clientX; drag.lastT = performance.now();
+  });
+  const end = (e) => {
+    n = Math.max(0, n - 1);
+    if (!drag) { reset(); return; }
+    const d = drag; drag = null;
+    const dt = Math.max(1, performance.now() - st.t), v = Math.abs((e.clientX - st.x) / dt); reset();
+    const complete = (d.p || 0) > 0.3 || (v > 0.6 && (d.p || 0) > 0.05);
+    d.ctl.finish(complete).then(() => { if (!complete) o.cleanup(); });
+    if (complete) o.commit(d.dir);
+    setTimeout(() => { flipDrag.active = false; }, 0);
+  };
+  host.addEventListener('pointerup', end);
+  host.addEventListener('pointercancel', (e) => { n = Math.max(0, n - 1); if (drag) { const d = drag; drag = null; d.ctl.finish(false).then(() => o.cleanup()); flipDrag.active = false; } reset(); });
+}
+flipDrag.active = false;
 // 「確定」：回到拍攝畫面（底色變透明），成品縮小飛進縮圖
 async function capResFly() {
   const el = $('#capRes'), pw = el.querySelector('.cr-pw');
   el.style.background = 'transparent'; el.querySelector('.cr-top').style.visibility = 'hidden'; el.querySelector('.cr-bar').style.visibility = 'hidden';
   el.querySelector('.cr-band').style.display = 'none'; el.querySelector('.cr-clip').style.clipPath = 'none';
-  if (animOn()) {
+  if (animOn() && capRes.left) { // 6.1.1 雙頁：左頁（前）＋右頁（右下）錯開疊好，一起飛進縮圖
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const a = pw.getBoundingClientRect(), tb = $('#liveThumb').getBoundingClientRect();
+    const lw = a.height * capRes.left.ar, lc = capRes.left.canvas;
+    Object.assign(lc.style, { position: 'fixed', left: a.left + 'px', top: a.top + 'px', width: lw + 'px', height: a.height + 'px', zIndex: 60, transformOrigin: '0 0', boxShadow: '0 4px 14px rgba(0,0,0,.4)', transition: 'transform .22s ease' });
+    document.body.appendChild(lc);
+    pw.style.transformOrigin = '0 0'; pw.style.transition = 'transform .22s ease';
+    pw.style.transform = `translate(${lw * 0.12}px,${a.height * 0.06}px)`;
+    await new Promise((r) => setTimeout(r, 240));
+    const st = tb.height / (a.height * 1.06), ease = 'transform .3s cubic-bezier(.5,0,.9,.6)';
+    lc.style.transition = pw.style.transition = ease;
+    lc.style.transform = `translate(${tb.left - a.left}px,${tb.top - a.top}px) scale(${st})`;
+    pw.style.transform = `translate(${tb.left - a.left + lw * 0.12 * st}px,${tb.top - a.top + a.height * 0.06 * st}px) scale(${st})`;
+    await new Promise((r) => setTimeout(r, 320));
+    lc.remove(); lc.width = lc.height = 0; capRes.left = null;
+  } else if (animOn()) {
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))); // 等拍攝畫面排好版，縮圖位置才對
     const a = pw.getBoundingClientRect(), tb = $('#liveThumb').getBoundingClientRect();
     pw.style.transformOrigin = '0 0'; pw.style.transition = 'transform .3s cubic-bezier(.5,0,.9,.6)';
@@ -3627,6 +3795,7 @@ function updateDocSelUI(total) {
   document.querySelectorAll('#pageGrid .pg:not(.add)').forEach((el) => el.classList.toggle('sel', docSel.ids.has(el.dataset.id)));
 }
 async function renderDoc() {
+  viewPreDrop(); // 6.1.1：單頁畫面預先讀的前後頁放掉
   dropViewUrls(''); // 5.2：回到文件畫面，單頁檢視的大圖網址放掉
   const { doc, pages } = await getDocPages(state.docId);
   if (!doc) return;
@@ -3833,7 +4002,8 @@ async function renderPage(keepZoom) {
   const p = await DB.get('pages', ids[state.pageIndex]);
   if (!p) { history.back(); return; }
   const pages = ids;
-  viewPage = p;
+  viewPage = p; viewIds = ids;
+  setTimeout(() => { if (current === 'page') viewPreload().catch(() => {}); }, 300); // 6.1.1
   $('#pageTitle').textContent = `第 ${state.pageIndex + 1} / ${pages.length} 頁`;
   $('#prevBtn').style.visibility = state.pageIndex > 0 ? 'visible' : 'hidden';
   $('#nextBtn').style.visibility = state.pageIndex < pages.length - 1 ? 'visible' : 'hidden';
@@ -3943,7 +4113,7 @@ function applyZoom(gesturing) {
   const up = (e) => {
     const p = pts.get(e.pointerId);
     pts.delete(e.pointerId);
-    if (swipeStart && p && pts.size === 0 && !adj.open) {
+    if (swipeStart && p && pts.size === 0 && !adj.open && !flipDrag.active && !viewFlip.dragged) { // 6.1.1：跟著手指翻的已經處理了
       const dx = pos(e)[0] - swipeStart[0], dy = pos(e)[1] - swipeStart[1];
       if (Math.abs(dx) > 70 && Math.abs(dx) > Math.abs(dy) * 1.5) step(dx < 0 ? 1 : -1);
     }
@@ -3972,6 +4142,45 @@ function plainHide() {
   const p = viewPage; $('#cmpTag').style.display = 'none';
   if (p) { const img = $('#viewImg'); img.onload = null; img.src = blobUrl('v:' + p.id, p.processed || p.original, verOf(p, 'processed')); }
 }
+/* 6.1.1：單頁畫面跟著手指翻——先把前後一頁的成品讀進來（墊在下面用；只留前後各一頁，離開或換頁就放掉） */
+const viewFlip = { pre: new Map(), under: null, dragged: false };
+async function viewPreload() {
+  const { ids } = await docPageIds(state.docId);
+  const want = [ids[state.pageIndex - 1], ids[state.pageIndex + 1]].filter(Boolean);
+  for (const [id, v] of viewFlip.pre) if (!want.includes(id)) { URL.revokeObjectURL(v.url); viewFlip.pre.delete(id); }
+  for (const id of want) {
+    if (viewFlip.pre.has(id)) continue;
+    const p = await DB.get('pages', id); if (!p || current !== 'page') continue;
+    const b = p.processed || p.original; if (!b) continue;
+    const url = URL.createObjectURL(b), im = new Image(); im.src = url;
+    try { await im.decode(); } catch (_) { URL.revokeObjectURL(url); continue; }
+    if (!(ids.includes(id))) { URL.revokeObjectURL(url); continue; }
+    viewFlip.pre.set(id, { url, w: im.naturalWidth, h: im.naturalHeight, key: verOf(p, 'processed') });
+  }
+}
+function viewPreDrop() { for (const v of viewFlip.pre.values()) URL.revokeObjectURL(v.url); viewFlip.pre.clear(); }
+function viewUnderClean() { if (viewFlip.under) { viewFlip.under.remove(); viewFlip.under = null; } }
+let viewIds = [];
+flipDrag($('#viewStage'), {
+  ready: () => current === 'page' && !adj.open && zoom.s === 1,
+  canFlip: (d) => { const i = state.pageIndex + d; return i >= 0 && i < viewIds.length; },
+  under: (d) => {
+    const id = viewIds[state.pageIndex + d], v = id && viewFlip.pre.get(id); if (!v) return null;
+    const st = $('#viewStage').getBoundingClientRect(), pad = 14, sc = Math.min((st.width - pad * 2) / v.w, (st.height - pad * 2) / v.h);
+    const w = v.w * sc, h = v.h * sc, el = document.createElement('img');
+    el.src = v.url; Object.assign(el.style, { position: 'absolute', left: (st.width - w) / 2 + 'px', top: (st.height - h) / 2 + 'px', width: w + 'px', height: h + 'px', zIndex: 15, background: '#fff', boxShadow: '0 4px 22px rgba(58,40,30,.25)', pointerEvents: 'none' });
+    viewUnderClean(); $('#viewStage').appendChild(el); viewFlip.under = el; viewFlip.dragged = true;
+    return el;
+  },
+  snap: () => { const img = $('#viewImg'); return img.naturalWidth ? snapCanvases(img, [img]) : null; },
+  commit: (d) => {
+    state.pageIndex += d; zoom.s = 1; history.replaceState({ s: 'page', doc: state.docId, i: state.pageIndex }, '');
+    const img = $('#viewImg'), u = viewFlip.under;
+    renderPage().then(() => { const rm = () => { if (viewFlip.under === u) viewUnderClean(); }; if (img.complete) setTimeout(rm, 60); else { img.addEventListener('load', rm, { once: true }); setTimeout(rm, 1500); } });
+    setTimeout(() => { viewFlip.dragged = false; }, 0);
+  },
+  cleanup: () => { viewUnderClean(); viewFlip.dragged = false; },
+});
 function step(d) {
   // 6.1：翻頁加上翻書動畫（目前這頁拍成快照翻過去，下面換成新的頁）
   const img = $('#viewImg'), snap = flipOn() && !adj.open && img.naturalWidth ? snapCanvases(img, [img]) : null;

@@ -655,6 +655,9 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
   #crop .tools{grid-column:2;grid-row:2;flex-direction:column;justify-content:space-evenly;padding:4px calc(env(safe-area-inset-right,0px) + 6px) calc(var(--sb) + 4px) 4px;overflow-y:auto}
   #crop .tools .tool{flex:none;min-width:64px;font-size:11px;padding:3px 2px;gap:2px}
   #crop .tools .tool svg{width:22px;height:22px}
+  /* 6.1.1：成品小窗依高度縮小（作者：橫向時太大，常擋到手指而變透明），一樣會躲到對角 */
+  #crop #pip{width:auto;max-width:34%;height:auto}
+  #crop #pip #pipCv{width:auto;height:min(46vh,190px);max-width:100%}
   /* 單頁畫面：照片在左，右邊兩條直欄（模式＋調整、工具）（作者：右邊的東西也要直式，不要橫排佔寬度） */
   #page.active{display:grid;grid-template-columns:minmax(0,1fr) auto auto;grid-template-rows:auto minmax(0,1fr);background:var(--surface)}
   #page .bar{grid-column:1/-1}
