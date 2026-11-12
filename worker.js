@@ -638,12 +638,13 @@ function spreadQuad(cv, msg) {
   const { width: w, height: h } = msg;
   const rgba = new Uint8Array(msg.buffer);
   let q = null, G0 = null;
-  if (msg.mask) {
+  if (msg.outer) q = orderCorners(msg.outer.map((p) => [p[0] * w, p[1] * h])); // 6.1 即時掃描：外框已經有了（鎖定的框），只找書溝
+  else if (msg.mask) {
     const r = maskQuad(cv, Object.assign({}, msg, { buffer: rgba.slice().buffer, spread: true }));
     if (r && r.q) { q = r.q; G0 = r.G0; }
   } else {
-    const r = detectQuad(cv, rgba, w, h, false);
-    if (r && r.corners && !r.notch && !r.gutter && r.area > 0.25) q = orderCorners(r.corners.map((p) => [p[0] * w, p[1] * h]));
+    const r = detectQuad(cv, rgba, w, h, false, true); // 6.1：用雙頁偵測（不切書溝、單頁時找旁邊那頁）
+    if (r && r.corners && r.area > 0.25) q = orderCorners(r.corners.map((p) => [p[0] * w, p[1] * h]));
   }
   if (!q) return { fail: 'outer' };
   const src = new cv.Mat(h, w, cv.CV_8UC4); src.data.set(rgba);
@@ -780,7 +781,7 @@ function maskCurve(G, mask, w, h, Q) {
   return { corners: C, curve: bulge > 0.004 ? curve : null };
 }
 
-function detectQuad(cv, rgba, w, h, fast) {
+function detectQuad(cv, rgba, w, h, fast, spread) {
   const src = new cv.Mat(h, w, cv.CV_8UC4);
   src.data.set(rgba);
   const gray = new cv.Mat();
@@ -839,7 +840,11 @@ function detectQuad(cv, rgba, w, h, fast) {
     let early = null;
     try { early = inferCorner(blur.data, w, h, r.quad); } catch (e) { early = null; }
     if (early) r = Object.assign({}, r, { quad: early, area: polyArea(early) / (w * h), inferred: true });
-    else {
+    else if (spread) {
+      // 6.1 雙頁模式：要整本書，不在凹口、書溝切開。書溝很深的書（作者影片 9766 聖詩）兩頁會被當成兩張紙、只框到一頁 →
+      // 在候選框裡找旁邊那一頁（高度相近、上下重疊、左右緊鄰），合成整本
+      try { const pr = spreadPair(r, candidates, w, h); if (pr) r = pr; } catch (e) { /* 找不到就用原本的框 */ }
+    } else {
       // 兩頁交界的凹口（1.20）：切掉旁邊那頁露出的一條（書本攤開、散頁疊在一起）
       try { const nc = cutAtNotch(cv, bin, r, w, h); if (nc) r = Object.assign({}, r, nc); }
       catch (e) { /* 失敗就用原本的框 */ }
@@ -848,14 +853,39 @@ function detectQuad(cv, rgba, w, h, fast) {
       catch (e) { /* 找不到就算了 */ }
     }
   }
-  if (r && !r.inferred) { try { const iq = inferCorner(blur.data, w, h, r.quad); if (iq) r = Object.assign({}, r, { quad: iq, area: polyArea(iq) / (w * h), inferred: true }); } catch (e) { /* 推不出來就用原本的 */ } }
+  if (r && !r.inferred && !(spread && r.paired)) { try { const iq = inferCorner(blur.data, w, h, r.quad); if (iq) r = Object.assign({}, r, { quad: iq, area: polyArea(iq) / (w * h), inferred: true }); } catch (e) { /* 推不出來就用原本的 */ } }
   src.delete(); gray.delete(); blur.delete(); k.delete(); edges.delete(); bin.delete();
   if (!r) return null;
   // 往中心內縮約 0.6%，避免把紙張邊緣外的桌面拍進去
   const cx = r.quad.reduce((a, p) => a + p[0], 0) / 4, cy = r.quad.reduce((a, p) => a + p[1], 0) / 4;
   const inset = 0.006;
   const q = r.quad.map((p) => [p[0] + (cx - p[0]) * inset * 2, p[1] + (cy - p[1]) * inset * 2]);
-  return { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: r.area, gutter: !!r.gutter, notch: r.notch || 0, inferred: !!r.inferred };
+  return { corners: q.map((p) => [Math.min(1, Math.max(0, p[0] / w)), Math.min(1, Math.max(0, p[1] / h))]), area: r.area, gutter: !!r.gutter, notch: r.notch || 0, inferred: !!r.inferred, paired: !!r.paired };
+}
+// 6.1：框到的是單頁時，找旁邊那一頁合成整本（四角順序 左上、右上、右下、左下）
+function spreadPair(r, cands, w, h) {
+  const Q = orderCorners(r.quad);
+  const wd = (Math.hypot(Q[1][0] - Q[0][0], Q[1][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[3][0], Q[2][1] - Q[3][1])) / 2;
+  const ht = (Math.hypot(Q[3][0] - Q[0][0], Q[3][1] - Q[0][1]) + Math.hypot(Q[2][0] - Q[1][0], Q[2][1] - Q[1][1])) / 2;
+  if (wd > ht * 1.05) return null; // 已經是橫的（像整本），不用找
+  const yr = (q) => [Math.min(q[0][1], q[1][1]), Math.max(q[2][1], q[3][1])];
+  const [a0, a1] = yr(Q), cxA = (Q[0][0] + Q[1][0] + Q[2][0] + Q[3][0]) / 4;
+  let best = null;
+  for (const c of cands) {
+    if (c === r || c.area < r.area * 0.6 || c.area > r.area * 1.6) continue;
+    const P = orderCorners(c.quad), [b0, b1] = yr(P);
+    const ov = (Math.min(a1, b1) - Math.max(a0, b0)) / Math.max(1, Math.min(a1 - a0, b1 - b0));
+    if (ov < 0.8) continue;
+    const cxB = (P[0][0] + P[1][0] + P[2][0] + P[3][0]) / 4;
+    const L = cxA < cxB ? Q : P, R = cxA < cxB ? P : Q;
+    const gap = ((R[0][0] + R[3][0]) - (L[1][0] + L[2][0])) / 2; // 左頁右緣到右頁左緣
+    if (gap < -wd * 0.12 || gap > wd * 0.12) continue;
+    const s = ov - Math.abs(gap) / wd + (c.f || 0);
+    if (!best || s > best.s) best = { s, L, R };
+  }
+  if (!best) return null;
+  const { L, R } = best, quad = [L[0], R[1], R[2], L[3]];
+  return Object.assign({}, r, { quad, area: polyArea(quad) / (w * h), paired: true });
 }
 
 /* ---------- 真實長寬比（Zhang & He 白板掃描法） ---------- */
@@ -1577,8 +1607,8 @@ self.onmessage = async (e) => {
   try {
     const { cv } = await getCv();
     if (type === 'detect') {
-      const { buffer, width, height, fast } = e.data;
-      const r = detectQuad(cv, new Uint8Array(buffer), width, height, !!fast);
+      const { buffer, width, height, fast, spread } = e.data;
+      const r = detectQuad(cv, new Uint8Array(buffer), width, height, !!fast, !!spread); // 6.1 spread：雙頁模式要整本
       self.postMessage({ id, ok: true, result: r });
     } else if (type === 'teedQuad') {
       // 4.3：即時掃描的 TEED 後援，只用 TEED 自己的框（沒把握回傳 null）
