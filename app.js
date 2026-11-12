@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.0.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.0.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -872,6 +872,26 @@ $('#burstDots').querySelectorAll('button').forEach((b, i) => b.onclick = () => b
 $('#burstEdit').onclick = async () => {
   if (!burst.lastPageId) return;
   const p = await DB.get('pages', burstViewId()); if (!p) return; // 6.0.1：雙頁時編輯目前看到的那一頁
+  const pr = burstPair();
+  if (pr) { // 6.0.2：雙頁拍的那張回到兩頁都能調的裁切畫面，從目前看到的那頁開始
+    const pp = await Promise.all(pr.map((id) => DB.get('pages', id)));
+    if (pp.every(Boolean)) {
+      openCrop({
+        blob: p.original, rotation: p.rotation || 0,
+        spread: { pages: pp.map((q) => ({ corners: q.corners, curve: q.curve || null })), start: pr.indexOf(p.id), seen: [true, true] },
+        onSpread: async (list, rot) => {
+          sfxPrime();
+          for (let i = 0; i < 2; i++) {
+            const q = await DB.get('pages', pr[i]); if (!q) continue;
+            q.corners = list[i].c; q.curve = list[i].cv; q.rotation = rot; if (list[i].edited) q.cropUser = true; delete q.needCrop;
+            await DB.put('pages', q); enqueue(q.id);
+          }
+          burst.fresh = true; toBurst();
+        },
+      });
+      return;
+    }
+  }
   openCrop({
     blob: p.original, corners: p.corners, curve: p.curve || null, rotation: p.rotation || 0,
     onConfirm: async (c, cv, edited, rot) => {
@@ -970,20 +990,10 @@ async function spreadCamera(blob) {
     if (!need) toast(`已加入第 ${burst.count - 1}、${burst.count} 張`);
     return;
   }
-  // 每張先確認裁切：先裁左頁，確定後接著裁右頁（右頁沿用左頁的轉向）；兩頁都確定才存。任一頁按取消＝這張不存，重拍＝重新拍
+  // 每張先確認裁切：6.0.2 同一個裁切畫面調兩頁（點另一頁的框或上方「左頁｜右頁」換頁），兩頁都確定才存。取消＝這張不存，重拍＝重新拍
   openCrop({
-    blob, corners: L.corners, curve: L.curve, retake: true, burst: true, title: '調整左頁範圍',
-    spread: { step: 1, other: R.corners, label: '右頁（下一步）' }, okText: '下一頁', // 6.0.1：另一頁標出來、步驟提示、確定鈕改字
-    onConfirm: async (c, cv, edited, rot) => {
-      sfxPrime();
-      const left = { c, cv, edited, rot };
-      openCrop({
-        blob, corners: R.corners, curve: R.curve, rotation: rot, retake: true, burst: true, replace: true, title: '調整右頁範圍',
-        spread: { step: 2, other: c, label: '左頁 ✓' },
-        onConfirm: async (c2, cv2, ed2, rot2) => { sfxPrime(); await spreadSave(blob, [left, { c: c2, cv: cv2, edited: ed2, rot: rot2 }]); toBurst(); },
-        onRetake: () => openCamera(),
-      });
-    },
+    blob, retake: true, burst: true, spread: { pages: [L, R], start: 0 },
+    onSpread: async (list, rot) => { sfxPrime(); await spreadSave(blob, list.map((it) => Object.assign(it, { rot }))); toBurst(); },
     onRetake: () => openCamera(),
   });
 }
@@ -2694,6 +2704,7 @@ function cropUrls(c) { if (c.url) URL.revokeObjectURL(c.url); if (c.viewUrl) URL
 function cropFree(c) { cropUrls(c); if (c.loupeSrc) c.loupeSrc.width = c.loupeSrc.height = 0; }
 async function openCrop(opts) {
   if (cropCtx) cropFree(cropCtx);
+  if (opts.spread) { const p0 = opts.spread.pages[opts.spread.start || 0]; opts = Object.assign({}, opts, { corners: p0.corners, curve: p0.curve }); } // 6.0.2 雙頁
   const { img, url } = await loadImg(opts.blob);
   const rot = ((opts.rotation || 0) % 360 + 360) % 360;
   const curve0 = opts.curve ? normCurve(opts.corners, opts.curve) : null;
@@ -2707,14 +2718,25 @@ async function openCrop(opts) {
   const nat = rot === 90 || rot === 270 ? [img.naturalHeight, img.naturalWidth] : [img.naturalWidth, img.naturalHeight];
   cropCtx = Object.assign({}, opts, { url, rot, nat, loupeSrc: rotCanvas(lc, rot), corners: v.corners, curve: v.curve, curveMode: false, o0: opts.corners.map((p) => p.slice()), ocv0: JSON.stringify(curve0 && !curveIsStraight(opts.corners, curve0) ? curve0 : null), drag: null, pipKey: 'crop:' + Date.now() });
   const c = cropCtx;
+  if (opts.spread) { // 6.0.2：兩頁都換成畫面座標（跟著轉向），各自記住打開時的範圍（判斷有沒有改過）
+    const S = opts.spread;
+    c.spread = {
+      active: S.start || 0, seen: S.seen ? S.seen.slice() : [false, false],
+      pages: S.pages.map((p) => {
+        const k = p.curve ? normCurve(p.corners, p.curve) : null, v = rotQuad(p.corners, k, rot);
+        return { corners: v.corners, curve: v.curve, o0: p.corners.map((x) => x.slice()), ocv0: JSON.stringify(k && !curveIsStraight(p.corners, k) ? k : null) };
+      }),
+    };
+    c.spread.seen[c.spread.active] = true;
+  }
   pipInit(c);
   await setCropView(c);
   if (cropCtx !== c) return;
   $('#cropRetake').style.display = opts.retake ? '' : 'none';
   $('#cropTitle').textContent = opts.title || '調整掃描範圍'; // 6.0：雙頁依序裁左頁、右頁
   $('#cropOk').textContent = opts.okText || '確定';
-  const stp = $('#cropStep'); stp.style.display = opts.spread ? '' : 'none';
-  if (opts.spread) stp.textContent = opts.spread.step === 1 ? '1／2 左頁' : '2／2 右頁';
+  $('#cropStep').style.display = opts.spread ? '' : 'none';
+  if (c.spread) cropSpreadUi();
   $('#cropCancel').textContent = opts.liveCrop ? '稍後裁切' : '取消';
   updateCurveBtn();
   if (opts.replace) { history.replaceState({ s: 'crop', doc: state.docId, i: state.pageIndex }, ''); show('crop'); } else go('crop'); // 3.1 成品畫面按「繼續編輯」：不多疊一層返回紀錄
@@ -2727,6 +2749,7 @@ $('#cropRot').onclick = async () => {
   try {
     const v = rotQuad(c.corners, c.curve, 90);
     c.rot = (c.rot + 90) % 360; c.corners = v.corners; c.curve = v.curve;
+    if (c.spread) { const o = c.spread.pages[1 - c.spread.active], w2 = rotQuad(o.corners, o.curve, 90); o.corners = w2.corners; o.curve = w2.curve; } // 6.0.2：兩頁一起轉
     c.loupeSrc = rotCanvas(c.loupeSrc, 90); c.nat = [c.nat[1], c.nat[0]];
     c.pipKey = 'crop:' + Date.now(); pipInit(c);
     await setCropView(c);
@@ -2840,10 +2863,11 @@ function drawCrop() {
   $('#cropSvg').innerHTML = html;
   // 6.0.1 雙頁：另一頁的範圍（原始照片座標，跟著目前的轉向）畫虛線框並標示，只是提示、不能拖
   const sp = cropCtx.spread;
-  if (sp && sp.other) {
-    const O = rotQuad(sp.other, null, cropCtx.rot).corners.map((p) => [p[0] * w, p[1] * h]);
+  if (sp) {
+    const O = sp.pages[1 - sp.active].corners.map((p) => [p[0] * w, p[1] * h]);
+    sp.label = `點這裡編輯${sp.active ? '左' : '右'}頁`;
     const ox = O.reduce((a, p) => a + p[0], 0) / 4, oy = O.reduce((a, p) => a + p[1], 0) / 4;
-    const tw = sp.label.length * 15 + 26;
+    const tw = sp.label.length * 15 + 24;
     html = `<polygon points="${O.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' ')}" fill="rgba(28,19,14,.25)" stroke="rgba(255,255,255,.55)" stroke-width="1.5" stroke-dasharray="6 5" stroke-linejoin="round"/>`
       + `<rect x="${ox - tw / 2}" y="${oy - 17}" width="${tw}" height="34" rx="17" fill="rgba(28,19,14,.72)"/>`
       + `<text x="${ox}" y="${oy + 5.5}" text-anchor="middle" font-size="15" font-weight="700" fill="#fff">${sp.label}</text>`;
@@ -3107,6 +3131,7 @@ $('#cropFull').onclick = () => {
 };
 $('#cropAuto').onclick = async () => {
   const c = cropCtx; if (!c) return;
+  if (c.spread) { await cropSpreadRedo(c, false); return; } // 6.0.2 雙頁：重新找整本書
   busy('偵測中…');
   try {
     const r = await detectOn($('#cropImg'));
@@ -3136,6 +3161,7 @@ $('#cropCurve').onclick = async () => {
 };
 $('#cropOk').onclick = async () => {
   const c = cropCtx; if (!c) return;
+  if (c.spread) { await cropSpreadOk(c); return; } // 6.0.2
   const q = c.corners;
   const area = Math.abs([0, 1, 2, 3].reduce((a, i) => { const j = (i + 1) % 4; return a + q[i][0] * q[j][1] - q[j][0] * q[i][1]; }, 0)) / 2;
   if (area < 0.01) { toast('範圍太小了'); return; }
@@ -3150,6 +3176,81 @@ $('#cropOk').onclick = async () => {
   const edited = !nearSame(o.corners, c.o0) || JSON.stringify(cv) !== c.ocv0;
   await c.onConfirm(o.corners, cv, edited, c.rot);
 };
+/* ---------- 6.0.2 雙頁裁切：同一個畫面調兩頁 ----------
+   作者：點另一頁的框就換頁比較直覺，兩頁像是整合在一起。一次編輯一頁（有控制點），另一頁是虛線框＋「點這裡編輯…」，
+   點虛線框裡（輕點、沒有移動；跟目前這頁重疊的地方算目前這頁）或上方「左頁｜右頁」換頁，調整都保留。
+   右上角：另一頁還沒看過時是「下一頁」（換過去），兩頁都看過是「確定」（兩頁一起存）。向右轉兩頁一起轉；
+   AI 框選／自動偵測＝重新找整本書，兩頁一起更新（找不到書溝保留原框）；全頁、直線／曲線、成品只作用在目前這頁 */
+const polyHas = (P, x, y) => { let inside = false; for (let i = 0, j = P.length - 1; i < P.length; j = i++) { const [xi, yi] = P[i], [xj, yj] = P[j]; if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside; } return inside; };
+function cropSpreadUi() {
+  const c = cropCtx, sp = c && c.spread; if (!sp) return;
+  $('#cropTitle').textContent = sp.active ? '調整右頁範圍' : '調整左頁範圍';
+  $('#cropStep').querySelectorAll('button').forEach((b, i) => b.classList.toggle('on', i === sp.active));
+  $('#cropOk').textContent = sp.seen[0] && sp.seen[1] ? '確定' : '下一頁';
+}
+function cropSwitch(i) {
+  const c = cropCtx, sp = c && c.spread;
+  if (!sp || i === sp.active || c.drag || c.rotating) return;
+  sp.pages[sp.active] = { corners: c.corners, curve: c.curve, o0: c.o0, ocv0: c.ocv0 };
+  const q = sp.pages[i]; sp.active = i; sp.seen[i] = true;
+  c.corners = q.corners.map((p) => p.slice()); c.curve = q.curve ? q.curve.map((e) => e.map((p) => p.slice())) : null; c.o0 = q.o0; c.ocv0 = q.ocv0;
+  if (c.curveMode && !c.curve) c.curve = straightCurve(c.corners);
+  cropSpreadUi(); drawCrop();
+}
+async function cropSpreadOk(c) {
+  const sp = c.spread;
+  if (!sp.seen[1 - sp.active]) { cropSwitch(1 - sp.active); return; }
+  if (c.rotating) return;
+  sp.pages[sp.active] = { corners: c.corners, curve: c.curve, o0: c.o0, ocv0: c.ocv0 };
+  const area = (q) => Math.abs([0, 1, 2, 3].reduce((a, i) => { const j = (i + 1) % 4; return a + q[i][0] * q[j][1] - q[j][0] * q[i][1]; }, 0)) / 2;
+  const bad = sp.pages.findIndex((pg) => area(pg.corners) < 0.01);
+  if (bad >= 0) { cropSwitch(bad); toast('範圍太小了'); return; }
+  cropCtx = null; cropFree(c); pipClose();
+  const list = sp.pages.map((pg) => {
+    const o = rotQuad(pg.corners, pg.curve, 360 - c.rot);
+    const cv = o.curve && !curveIsStraight(o.corners, o.curve) ? o.curve : null;
+    return { c: o.corners, cv, edited: !nearSame(o.corners, pg.o0) || JSON.stringify(cv) !== pg.ocv0 };
+  });
+  await c.onSpread(list, c.rot);
+}
+async function cropSpreadRedo(c, useAI) {
+  busy(useAI ? 'AI 框選中…' : '偵測中…');
+  try {
+    const useTeed = useAI || (await aiCached());
+    const r = await spreadSplit(c.blob, useAI, useTeed);
+    if (useTeed) aiReleaseSoon();
+    if (cropCtx !== c) return;
+    if (!r.ok) { toast('找不到書溝，保留原框'); return; }
+    const sp = c.spread;
+    r.pages.forEach((p, i) => {
+      const v = rotQuad(p.corners, p.curve, c.rot);
+      if (i === sp.active) { c.corners = v.corners; c.curve = v.curve || (c.curveMode ? straightCurve(v.corners) : null); }
+      else { sp.pages[i].corners = v.corners; sp.pages[i].curve = v.curve; }
+    });
+    drawCrop();
+    toast(useAI ? '已用 AI 重新框選左右兩頁' : '已重新偵測左右兩頁');
+  } catch (e) { console.warn(e); toast('框選失敗：' + e.message); }
+  finally { unbusy(); }
+}
+$('#cropStep').querySelectorAll('button').forEach((b, i) => b.onclick = () => cropSwitch(i));
+{ // 輕點另一頁的框＝換頁（拖控制點、雙指縮放、平移都不算）
+  const st = $('#cropStage'); let tap = null, n = 0;
+  st.addEventListener('pointerdown', (e) => {
+    n++;
+    const c = cropCtx;
+    tap = n === 1 && c && c.spread && !c.drag && !e.target.closest('#pip, #pipFull, #cropStep') ? { x: e.clientX, y: e.clientY, t: Date.now() } : null;
+  });
+  st.addEventListener('pointermove', (e) => { if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) > 8) tap = null; });
+  st.addEventListener('pointerup', (e) => {
+    n = Math.max(0, n - 1);
+    const t = tap, c = cropCtx; tap = null;
+    if (!t || !c || !c.spread || c.drag || Date.now() - t.t > 500) return;
+    const b = st.getBoundingClientRect(), r = c.rect, u = (e.clientX - b.left - r.x) / r.w, v = (e.clientY - b.top - r.y) / r.h;
+    const sp = c.spread;
+    if (polyHas(sp.pages[1 - sp.active].corners, u, v) && !polyHas(cropOutline(c.corners, c.curve), u, v)) cropSwitch(1 - sp.active);
+  });
+  st.addEventListener('pointercancel', () => { n = Math.max(0, n - 1); tap = null; });
+}
 $('#cropCancel').onclick = () => history.back();
 $('#cropRetake').onclick = () => { const c = cropCtx; cropCtx = null; if (c) cropFree(c); pipClose(); if (c && c.onRetake) c.onRetake(); history.back(); };
 $('#cropPrev').onclick = () => ($('#pipFull').classList.contains('show') ? pipFullClose() : pipFullOpen()); // 3.1：再按一次回到框選
@@ -4675,6 +4776,7 @@ function aiRejectMsg(r) {
 $('#cropAI').onclick = async () => {
   const c = cropCtx; if (!c) return;
   if (!(await aiEnsure())) return;
+  if (c.spread) { if (cropCtx === c) await cropSpreadRedo(c, true); return; } // 6.0.2 雙頁：AI 重新找整本書
   busy('AI 框選中…');
   try {
     const r = await aiFrame($('#cropImg'));

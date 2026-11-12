@@ -343,7 +343,9 @@ input[type=file]{display:none}
 .bdots{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);z-index:2;display:flex;gap:2px;background:rgba(28,19,14,.6);border-radius:999px;padding:3px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
 .bdots button{padding:5px 14px;border-radius:999px;font-size:13px;font-weight:700;color:rgba(255,255,255,.75)}
 .bdots button.on{background:var(--cream);color:var(--cocoa)}
-#cropStep{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:5;color:#fff;pointer-events:none}
+#cropStep{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:5;display:flex;gap:2px;background:rgba(28,19,14,.65);border-radius:999px;padding:3px;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+#cropStep button{padding:6px 16px;border-radius:999px;font-size:13.5px;font-weight:700;color:rgba(255,255,255,.75)}
+#cropStep button.on{background:var(--cream);color:var(--cocoa)}
 #burst .controls{flex:none;padding:6px 20px calc(var(--sb) + 18px)}
 #burst .row{display:flex;align-items:center;justify-content:space-between;margin-top:12px}
 #burstNext{width:84px;height:84px;border-radius:50%;background:var(--cream);color:var(--cocoa);display:grid;place-items:center;box-shadow:0 6px 20px rgba(0,0,0,.35)}
@@ -733,7 +735,7 @@ html.ipad{--st:calc(env(safe-area-inset-top,0px) + 24px)}
     <button class="tbtn solid" id="cropOk">確定</button>
   </header>
   <div id="cropStage">
-    <div class="pill" id="cropStep" style="display:none"></div><!-- 6.0.1 -->
+    <div class="cseg" id="cropStep" style="display:none"><button>左頁</button><button>右頁</button></div><!-- 6.0.1；6.0.2 可以點 -->
     <img id="cropImg" alt="">
     <svg id="cropSvg"></svg>
     <div id="pip"><canvas id="pipCv"></canvas><div class="pip-gl"></div><span class="pip-lb">成品預覽</span></div>
