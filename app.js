@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.2.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2.3'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -4945,6 +4945,8 @@ $('#btnSettings').onclick = () => {
     <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
     <button class="srow" id="setAiOpt" style="display:none"><span>有可最佳化的 AI 效能，點擊最佳化 ›<span class="sub">導入 CPU 多核心，讓 AI 框選更快，約需 10～40 秒</span></span></button>
     <button class="srow" id="setAiReopt" style="display:none;font-size:14px;padding:8px 12px"><span>重新最佳化 AI 效能 ›<span class="sub" id="setAiReoptSub"></span></span></button>
+    <div class="note" id="setAiIos" style="display:none;font-size:13px;margin:4px 12px 0"></div>
+    <button class="srow" id="setAiRetest" style="display:none;font-size:14px;padding:8px 12px"><span id="setAiRetestTx">已經升級 iOS 27？點這裡重新測試 ›</span></button>
     ${IS_IOS
     ? '<div class="note" style="margin:10px 2px 4px">橫拿拍攝：請關閉螢幕方向鎖定，直接橫拿就可以拍。</div>'
     : !hasMotion() ? '' : `<div class="switch"><span>橫拿拍攝<small>橫拿時按鈕跟著轉、拍好的頁自動轉正</small></span><button class="tg ${settings.landscape !== false ? 'on' : ''}" data-k="landscape"></button></div>`}
@@ -4959,7 +4961,7 @@ $('#btnSettings').onclick = () => {
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成淡藍色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
-    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速（精修與框選）</span></button><button class="srow" id="aiUnsafe" style="${settings.aiSafeCPU || settings.aiCrashN ? '' : 'display:none'}"><span>解除框選閃退保護</span></button></div>
+    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速（精修與框選）</span></button><button class="srow" id="aiUnsafe" style="${settings.aiSafeCPU || settings.aiCrashN || settings.aiMtSafe || settings.aiMtCrashN || settings.aiMtOffVer === APP_VER ? '' : 'display:none'}"><span>解除框選閃退保護</span></button></div>
     <div class="note" id="setVer" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     // 5.0：隱藏區（TEED 協助標記開關、AI 診斷）。5.1.9 起入口改在更新日誌的「目前版本」連點 5 下（logCurrent），這裡不再能點
     s.querySelector('#srRebench').onclick = async () => { // 5.1.7：隱藏區手動重測；5.1.9 精修與框選一起
@@ -4971,7 +4973,8 @@ $('#btnSettings').onclick = () => {
       const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
     };
     s.querySelector('#aiUnsafe').onclick = () => { // 5.1.9：手動解除框選閃退保護
-      settings.aiSafeCPU = false; settings.aiCrashN = 0; aiSafeNow = false; settings.aiBenchV = null; settings.aiBenchN = 0; aiBenchedNow = false; saveSettings();
+      settings.aiSafeCPU = false; settings.aiCrashN = 0; aiSafeNow = false; settings.aiBenchV = null; settings.aiBenchN = 0; aiBenchedNow = false;
+      settings.aiMtSafe = false; settings.aiMtCrashN = 0; settings.aiMtOffVer = null; aiMtSafeNow = false; saveSettings(); // 6.2.3：多核心的保護也一起解除
       aiNote('手動解除框選閃退保護'); aiReleaseNow();
       s.querySelector('#aiUnsafe').style.display = 'none';
       const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
@@ -4995,6 +4998,16 @@ $('#btnSettings').onclick = () => {
       if (b) b.style.display = can && optd ? '' : 'none';
       const sub = s.querySelector('#setAiReoptSub');
       if (sub && o) sub.textContent = `目前：AI 框選用 ${o.gpu ? 'GPU' : `CPU ${o.n} 核心`}；覺得變慢時可以重測`;
+      // 6.2.3：iPhone／iPad 的 AI 因 iOS 26 或閃退保護改用較穩定的方式時說明；閃退定案的可以按重新測試
+      const prot = !!(settings.aiSafeCPU || aiSafeNow || settings.aiMtSafe || aiMtSafeNow || settings.aiMtOffVer === APP_VER);
+      const ios = s.querySelector('#setAiIos'), rt = s.querySelector('#setAiRetest');
+      if (ios && rt) {
+        const show = !!AI_IOS_DEV && (aiOldIOS || prot) && st.model;
+        ios.style.display = show ? '' : 'none';
+        ios.textContent = aiOldIOS ? aiIosAdvice() : `上次 AI 處理中斷過，目前使用較穩定的方式。${aiIosAdvice()}`;
+        rt.style.display = show && !aiOldIOS && prot ? '' : 'none';
+        s.querySelector('#setAiRetestTx').textContent = AI_IOS_VER == null ? '已經升級 iOS 27？點這裡重新測試 ›' : '點這裡重新測試 ›';
+      }
     };
     aiStat();
     s.querySelector('#setAiUp').onclick = async () => {
@@ -5003,6 +5016,7 @@ $('#btnSettings').onclick = () => {
     const optGo = async () => { closeSheet(); await aiOptimize(); };
     s.querySelector('#setAiOpt').onclick = optGo;
     s.querySelector('#setAiReopt').onclick = optGo;
+    s.querySelector('#setAiRetest').onclick = async () => { closeSheet(); await aiRetest(); };
     // 3.1 拍攝動畫：沒設定過時弱 Android 預設關；系統開了「減少動態效果」一律不播
     if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) s.querySelector('#animNote').textContent = '手機已開啟「減少動態效果」，動畫不會播放';
     s.querySelector('#setAnim').onclick = () => { settings.capAnim = !animPref(); saveSettings(); s.querySelector('#setAnim').classList.toggle('on', settings.capAnim); };
@@ -5224,18 +5238,16 @@ if (settings.aiSafeCPU && settings.aiCrashN == null) { settings.aiSafeCPU = fals
 else if (settings.aiSafeCPU && settings.aiSafeVer !== APP_VER) { settings.aiSafeCPU = false; settings.aiCrashN = 1; settings.aiBenchV = null; settings.aiBenchN = 0; saveSettings(); aiNote('更新到新版本，框選閃退保護再給一次 GPU 機會'); }
 /* 6.2.2：作者發現一支 iOS 26.7.1 的 iPhone 17（正式版第一次安裝）AI 框選、精修、重新測速幾乎每次閃退回封面（結果有存到），
    作者自己 iOS 27.2 的 iPhone 17 正常；那支框選 GPU 1224／CPU 1925 毫秒（正常約 220／980）。推測 iOS 26 的 Safari WebGPU（第一代）不穩。
-   作者決定：(乙) iOS 26 以前的 iPhone／iPad 框選、精修一律 CPU、不測 GPU——只有 Safari 的網址列模式看得到版本（Version/26.x）；
-   加到主畫面後 iOS 的 UA 沒有 Version、系統版本也固定寫 18_7，分不出 26 或 27，只能靠 (甲)：
+   作者決定：(乙) iOS 26 以前的 iPhone／iPad 框選、精修一律 CPU、不測 GPU（UA 的 Version/26.x；6.2.3 更正：作者那支 iOS 26.7.1 加到主畫面的 App
+   隱藏區顯示「iOS 26，一律 CPU」，主畫面 App 也讀得到。系統版本那段固定寫 18_7 不能用，Version 才是真的；讀不到時當作不是 iOS 26）；
    (甲) 閃退保護擴大到所有用 GPU 的 AI（單張框選、精修、測速、最佳化的 GPU 那步）：開始前記一筆（AI_GPU_KEY）、做完清掉，
    下次打開還在＝做到一半閃退 → 跟批次框選同一套（aiCrashN）：第 1 次這次打開先用 CPU，第 2 次這個版本一律 CPU；GPU 順利做完一次歸零 */
-const AI_IOS_VER = (() => {
-  const u = navigator.userAgent;
-  if (!(/iPhone|iPad|iPod/.test(u) || (/Macintosh/.test(u) && navigator.maxTouchPoints > 1))) return null;
-  const m = u.match(/Version\/(\d+)/); return m ? +m[1] : null;
-})();
+const AI_IOS_DEV = /iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1) ? 'iPad' : /iPhone|iPod/.test(navigator.userAgent) ? 'iPhone' : null;
+const AI_IOS_FULL = AI_IOS_DEV && (navigator.userAgent.match(/Version\/([\d.]+)/) || [])[1] || null; // 6.2.3：例如 26.7.1
+const AI_IOS_VER = AI_IOS_FULL ? parseInt(AI_IOS_FULL, 10) : null;
 const aiOldIOS = AI_IOS_VER != null && AI_IOS_VER <= 26;
 const aiGpuOk = () => !aiOldIOS && !aiSafeNow && !settings.aiSafeCPU;
-const aiGpuWhy = () => (aiOldIOS ? `iOS ${AI_IOS_VER}，一律 CPU` : settings.aiSafeCPU ? '閃退保護，這個版本一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : '');
+const aiGpuWhy = () => (aiOldIOS ? `iOS ${AI_IOS_FULL}，一律 CPU` : settings.aiSafeCPU ? '閃退保護，這個版本一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : '');
 const AI_GPU_KEY = 'cocoscan-aigpu';
 let aiGpuJobs = 0, aiSrEPNow = 'wasm';
 function aiGpuMark(d) {
@@ -5279,14 +5291,33 @@ function aiCrashCheck() {
     if (settings.aiCrashN >= 2) { settings.aiEP = 'wasm'; settings.aiSafeCPU = true; settings.aiSafeVer = APP_VER; aiNote('AI 用 GPU 時又中斷（第 2 次），這個版本框選、精修一律用 CPU'); }
     else aiNote('AI 用 GPU 時中斷（第 1 次），這次先用 CPU，下次打開再試 GPU');
     saveSettings();
-    setTimeout(() => toast('上次 AI 處理中斷，已改用較穩定的方式'), 1500);
+    aiCrashTell('上次 AI 處理中斷，已改用較穩定的方式');
     return;
   }
   settings.aiCrashN = (settings.aiCrashN || 0) + 1; aiSafeNow = true; // 5.1.7：這次打開期間先用 CPU
   if (settings.aiCrashN >= 2) { settings.aiEP = 'wasm'; settings.aiSafeCPU = true; settings.aiSafeVer = APP_VER; aiNote('框選又中斷（第 2 次），這個版本一律用 CPU'); }
   else aiNote('框選中斷（第 1 次），這次先用 CPU，下次打開再試 GPU');
   saveSettings();
-  setTimeout(() => toast('上次 AI 框選中斷，已改用較省記憶體的方式'), 1500);
+  aiCrashTell('上次 AI 框選中斷，已改用較省記憶體的方式');
+}
+/* 6.2.3：iPhone／iPad 閃退保護啟動時跳一次說明（作者定的用語）：讀得到 iOS 版本→「你的 iPhone 是 iOS 26.7.1，AI 使用較穩定的 CPU 模式；
+   升級到 iOS 27 後會自動恢復較快的速度。」；讀不到→「建議升級到 iOS 27 後會自動恢復較快的速度。」（不一定是 iOS 26）；
+   已經是 iOS 27 以上就不提升級。Android、電腦照舊一閃而過的提示 */
+function aiIosAdvice() {
+  if (!AI_IOS_DEV) return '';
+  if (AI_IOS_VER == null) return '建議升級到 iOS 27 後會自動恢復較快的速度。';
+  if (AI_IOS_VER <= 26) return `你的 ${AI_IOS_DEV} 是 iOS ${AI_IOS_FULL}，AI 使用較穩定的 CPU 模式；升級到 iOS 27 後會自動恢復較快的速度。`;
+  return '';
+}
+let aiCrashTold = false;
+function aiCrashTell(t) {
+  if (!AI_IOS_DEV) { setTimeout(() => toast(t), 1500); return; }
+  if (aiCrashTold) return; aiCrashTold = true; // 同一次打開只跳一次（GPU、多核心可能同時觸發）
+  setTimeout(() => {
+    const adv = aiIosAdvice();
+    openSheet(`<h3>AI 處理中斷</h3><div class="note" style="margin:2px 4px 14px;font-size:14.5px;line-height:1.7">上次 AI 處理時中斷，已改用較穩定的方式。${adv ? `<br>${adv}` : ''}</div>
+      <button class="bigbtn" id="crashOk" style="width:100%">知道了</button>`, (sh) => { sh.querySelector('#crashOk').onclick = () => closeSheet(); });
+  }, 1500);
 }
 aiCrashCheck();
 function aiPost(payload, transfer) {
@@ -5294,8 +5325,11 @@ function aiPost(payload, transfer) {
   const t = payload.type;
   const gpu = (t === 'mask' && aiEPNow === 'webgpu') || (t === 'srTile' && aiSrEPNow === 'webgpu') || ((t === 'bench' || t === 'srBench') && !payload.noGpu); // 6.2.2
   if (gpu) aiGpuMark(1);
+  const mt = aiThreadsUsed > 1 && !['init', 'setEP', 'srEP', 'srState', 'srRelease', 'warm'].includes(t); // 6.2.3：主 Worker 用多條在算
+  if (mt) aiMtMark(1);
   const p = new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
   if (gpu) p.then((r) => { aiGpuMark(-1); if (t === 'mask' || (t === 'srTile' && aiSrEPNow === 'webgpu')) aiGpuDone(); }, () => aiGpuMark(-1));
+  if (mt) p.then(() => { aiMtMark(-1); if (settings.aiMtCrashN) { settings.aiMtCrashN = 0; saveSettings(); } }, () => aiMtMark(-1));
   return p;
 }
 function aiInit() {
@@ -5346,8 +5380,33 @@ async function aiBench0() {
 const AI_OPT_V = 1;
 let aiThreadsUsed = 1, aiOptRunning = false;
 const aiIso = () => self.crossOriginIsolated === true;
-function aiThreadsNow() { return aiIso() && settings.aiOptV === AI_OPT_V && settings.aiThreads > 1 ? settings.aiThreads : 1; }
-async function aiOptCan() { if (!aiIso() || aiOldNow) return false; const st = await aiState(); return !!(st.model && st.neu); }
+/* 6.2.3 多核心閃退保護（作者那支 iOS 26.7.1 的 iPhone 17 按最佳化，Safari 整個崩潰到「重複發生問題」；重開 App 正常，只有最佳化跑不過）：
+   ① iOS 26 以前不提供最佳化（aiOldIOS），一律 1 條；
+   ② 最佳化途中記 AI_OPT_KEY，下次打開還在＝最佳化時閃退 → 這個 App 版本不再提供（aiMtOffVer，只算一次：使用者自己按的，留著按鈕等於再崩一次）；
+   ③ 最佳化完成後，主 Worker 用多條跑 AI 時記 AI_MT_KEY，閃退跟 GPU 同一套：第 1 次這次打開先 1 條（aiMtSafeNow），第 2 次這個版本一律 1 條（aiMtSafe）；
+   多條順利做完一次歸零。新版本時 ②③ 都再給一次機會 */
+const AI_OPT_KEY = 'cocoscan-aiopt', AI_MT_KEY = 'cocoscan-aimt';
+let aiMtSafeNow = false, aiMtJobs = 0;
+const aiMtOk = () => !aiOldIOS && !aiMtSafeNow && !settings.aiMtSafe;
+function aiThreadsNow() { return aiIso() && aiMtOk() && settings.aiOptV === AI_OPT_V && settings.aiThreads > 1 ? settings.aiThreads : 1; }
+async function aiOptCan() { if (!aiIso() || aiOldNow || aiOldIOS || settings.aiMtOffVer === APP_VER || settings.aiMtSafe || aiMtSafeNow) return false; const st = await aiState(); return !!(st.model && st.neu); }
+function aiMtMark(d) {
+  aiMtJobs = Math.max(0, aiMtJobs + d);
+  try { if (aiMtJobs > 0) localStorage.setItem(AI_MT_KEY, String(Date.now())); else localStorage.removeItem(AI_MT_KEY); } catch (_) {}
+}
+function aiMtCrashCheck() {
+  if (settings.aiMtSafe && settings.aiMtSafeVer !== APP_VER) { settings.aiMtSafe = false; settings.aiMtCrashN = 1; saveSettings(); aiNote('更新到新版本，多核心閃退保護再給一次機會'); }
+  let opt = null, mt = null;
+  try { opt = localStorage.getItem(AI_OPT_KEY); localStorage.removeItem(AI_OPT_KEY); mt = localStorage.getItem(AI_MT_KEY); localStorage.removeItem(AI_MT_KEY); } catch (_) {}
+  if (opt) { settings.aiMtOffVer = APP_VER; saveSettings(); aiNote('最佳化 AI 效能時中斷，這個版本不再提供最佳化'); aiCrashTell('上次最佳化 AI 效能時中斷，已改回單核心'); }
+  if (mt) {
+    settings.aiMtCrashN = (settings.aiMtCrashN || 0) + 1; aiMtSafeNow = true;
+    if (settings.aiMtCrashN >= 2) { settings.aiMtSafe = true; settings.aiMtSafeVer = APP_VER; aiNote('多核心 AI 又中斷（第 2 次），這個版本一律單核心'); }
+    else aiNote('多核心 AI 中斷（第 1 次），這次先用單核心，下次打開再試');
+    saveSettings(); aiCrashTell('上次 AI 處理中斷，已改用較穩定的方式');
+  }
+}
+aiMtCrashCheck();
 async function aiOptNeeded() { return settings.aiOptV !== AI_OPT_V && (await aiOptCan()); }
 // 進度條：沿用 #busy，加一條橫條（busy() 會把它藏起來）
 function busyProg(msg, p) { busy(msg); const b = $('#busyBar'); b.classList.add('on'); b.firstElementChild.style.width = Math.round(Math.max(0, Math.min(1, p)) * 100) + '%'; }
@@ -5365,12 +5424,14 @@ function optWorker(threads) {
   return { post, end: () => { fail('結束'); w.terminate(); } };
 }
 const napMs = (ms) => new Promise((r) => setTimeout(r, ms));
+function aiOptUnmark() { try { localStorage.removeItem(AI_OPT_KEY); } catch (_) {} }
 /* 6.2.1：作者實測 iPhone、iPad mini 7 會在一半（5／7）失敗，Y31 都成功 → 推測 iOS 連續開好幾個多執行緒 AI 引擎時記憶體不夠。改成：
    換 Worker 前停 0.5 秒；一種條數失敗就停 1 秒重試一次，還是失敗就跳過（用測到的選）；GPU 改到最後、自己一個 Worker；
    失敗原因記在隱藏診斷區（aiNote）。連 1 條都測不到才算沒有完成 */
 async function aiOptimize() {
   if (aiOptRunning || !(await aiOptCan())) return false;
   aiOptRunning = true;
+  try { localStorage.setItem(AI_OPT_KEY, String(Date.now())); } catch (_) {} // 6.2.3：最佳化途中閃退的記號
   const hc = navigator.hardwareConcurrency || 4, hasTeed = await aiHas([TEED_FILE]);
   const list = [1, 2, 4].filter((n) => n === 1 || n <= hc), gpuTry = !!navigator.gpu && aiGpuOk();
   const per = hasTeed ? 2 : 1, total = list.length * per + (gpuTry ? 1 : 0);
@@ -5429,13 +5490,13 @@ async function aiOptimize() {
     settings.aiThreads = n; settings.aiOptV = AI_OPT_V; settings.aiOptAsked = true;
     settings.aiOptR = { n, gpu: gpuOk, u2: R.u2, td: R.td, g: R.gpu, before, after };
     aiNote(`最佳化 AI 效能：框選 ${gpuOk ? 'GPU' : 'CPU ' + n + ' 條'}、TEED ${n} 條（${ns.map((k) => `${k} 條 ${Math.round(R.u2[k])}/${R.td[k] != null ? Math.round(R.td[k]) : '-'}`).join('、')}${R.gpu != null ? `、GPU ${Math.round(R.gpu)}` : ''}）`);
-    saveSettings(); aiReset(); unbusy(); aiOptRunning = false;
+    saveSettings(); aiReset(); unbusy(); aiOptRunning = false; aiOptUnmark();
     aiOptShow(before, after, gpuOk, n);
     return true;
   } catch (e) {
     if (w) w.end();
     if (!errs.length) aiNote('最佳化沒有完成：' + err(e));
-    unbusy(); aiOptRunning = false; console.warn('AI opt', e);
+    unbusy(); aiOptRunning = false; aiOptUnmark(); console.warn('AI opt', e);
     toast('最佳化沒有完成，可以在設定的 AI 那欄再試一次');
     return false;
   }
@@ -5447,9 +5508,22 @@ function aiOptShow(before, after, gpu, n) {
   openSheet(`<h3>AI 效能最佳化完成</h3><div class="note" style="margin:2px 4px 14px;font-size:14.5px;line-height:1.7">${body}<div style="opacity:.75;font-size:13px;margin-top:6px">這支手機：${gpu ? `AI 框選用 GPU${n > 1 ? `，輔助用 CPU ${n} 核心` : ''}` : `AI 框選與輔助都用 CPU ${n} 核心`}</div></div>
     <button class="bigbtn" id="optOk" style="width:100%">好</button>`, (s) => { s.querySelector('#optOk').onclick = () => closeSheet(); });
 }
+// 6.2.3：設定的「重新測試」：解除 GPU 與多核心的閃退保護，重新比較框選（GPU 會再試）並重測精修；再閃退時保護照舊
+async function aiRetest() {
+  settings.aiSafeCPU = false; settings.aiCrashN = 0; settings.aiMtSafe = false; settings.aiMtCrashN = 0; settings.aiMtOffVer = null;
+  settings.aiBenchV = null; saveSettings(); aiSafeNow = false; aiMtSafeNow = false;
+  aiNote('使用者按「重新測試」，解除閃退保護');
+  if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset();
+  busy('重新測試中…');
+  try { await aiInit(); await aiBench(); } catch (e) { console.warn('retest', e); }
+  unbusy();
+  try { if (await aiHas([SR_FILE])) await srBenchNow(true); } catch (e) { console.warn('retest sr', e); }
+  aiReleaseNow();
+  toast(`重新測試完成：框選用 ${settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}${(await aiOptCan()) ? '，可以在設定裡最佳化 AI 效能' : ''}`);
+}
 // 從封面進主畫面時：還沒最佳化、有新 AI 引擎、這次有隔離，問一次（按「稍後」之後只在設定裡出現）
 async function aiOptAsk() {
-  if (settings.aiOptAsked || !(await aiOptNeeded()) || current !== 'home' || $('#sheetWrap').classList.contains('show')) return;
+  if (settings.aiOptAsked || aiCrashTold || !(await aiOptNeeded()) || current !== 'home' || $('#sheetWrap').classList.contains('show')) return; // 6.2.3：剛跳過閃退說明的那次不再問
   settings.aiOptAsked = true; saveSettings();
   const yes = await askSheet('最佳化 AI 效能', '6.2 版導入 CPU 多核心，可以讓 AI 框選更快。<br>將測試這支手機跑 AI 最快的方式，約需 10～40 秒，測試時請不要離開這個畫面。', '開始最佳化', '稍後');
   if (yes) await aiOptimize();
@@ -5709,7 +5783,7 @@ const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt
 function srInfoText() {
   const b = settings.srBench, L = settings.srLast, out = [];
   out.push(`AI 引擎：${aiEngineNow ? (aiEngineNow === 'new' ? '新引擎' : '舊引擎（相容模式）') + `，框選用 ${aiEPNow === 'webgpu' ? 'GPU' : 'CPU'}，CPU ${aiThreadsUsed} 條` : aiOldNow ? '這次用相容模式（尚未載入）' : '尚未載入'}`);
-  out.push(`多核心：${aiIso() ? '已隔離' : '未隔離（單核心）'}・核心 ${navigator.hardwareConcurrency || '?'}・${settings.aiOptV === AI_OPT_V ? `已最佳化 ${settings.aiThreads || 1} 條` : '尚未最佳化'}`); // 6.2
+  out.push(`多核心：${aiIso() ? '已隔離' : '未隔離（單核心）'}・核心 ${navigator.hardwareConcurrency || '?'}・${aiOldIOS ? `iOS ${AI_IOS_FULL} 不提供` : settings.aiMtOffVer === APP_VER ? '最佳化時中斷過，這個版本不提供' : settings.aiMtSafe ? '閃退保護，這個版本一律單核心' : aiMtSafeNow ? '閃退保護，這次先用單核心' : settings.aiOptV === AI_OPT_V ? `已最佳化 ${settings.aiThreads || 1} 條` : '尚未最佳化'}${settings.aiMtCrashN ? `（中斷 ${settings.aiMtCrashN} 次）` : ''}`); // 6.2／6.2.3
   const ab = settings.aiBenchR, abN = settings.aiBenchN || 1;
   out.push(`框選：${aiGpuOk() ? (settings.aiEP === 'webgpu' ? 'GPU' : 'CPU') : aiGpuWhy()}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}` +
     (ab ? `（比較 CPU ${ab.cpu}、${ab.gpu != null ? 'GPU ' + ab.gpu : 'GPU 無法使用'}${settings.aiEP !== 'webgpu' && !settings.aiSafeCPU ? `；第 ${abN} 次，${abN >= AI_RETRY ? '已定案' : '下次打開再比'}` : ''}）` : ''));
