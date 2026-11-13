@@ -78,7 +78,7 @@ async function run(s, f, tm) {
   return qRun(s, { [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, 320, 320]) }, tm); // 5.1.8 排隊
 }
 // 一次性的速度比較：CPU 跑一次、GPU 跑一次（GPU 第一次已含準備時間，實測和之後差不多），回傳毫秒；不支援 GPU 時 gpu＝null
-async function bench() {
+async function bench(noGpu) { // 6.2.2：noGpu＝GPU 停用中（iOS 26／閃退保護），只測 CPU
   const f = new Float32Array(3 * N).fill(0.1);
   await release();
   let cpu = null, gpu = null;
@@ -87,7 +87,7 @@ async function bench() {
   await qRel(sc);
   let hasGpu = false;
   try { hasGpu = !!(self.navigator && self.navigator.gpu && (await self.navigator.gpu.requestAdapter())); } catch (_) {}
-  if (engine === 'new' && hasGpu) {
+  if (engine === 'new' && hasGpu && !noGpu) {
     try {
       const sg = await create('webgpu');
       await run(sg, f, tm); gpu = tm.ms;
@@ -138,7 +138,7 @@ async function srRun(s, buf, n, tm) {
   return p.buffer;
 }
 // 精修測速：同一塊各跑兩次（第一次含 GPU 準備時間），量第二次；回傳每塊毫秒 { cpu, gpu }
-async function srBench(n) {
+async function srBench(n, noGpu) {
   const buf = () => new Uint8ClampedArray(n * n * 4).fill(200).buffer;
   await srRelease();
   let cpu = null, gpu = null, why = '';
@@ -147,7 +147,8 @@ async function srBench(n) {
   await qRel(sc);
   // 5.1.7：GPU 用不了時記下原因（舊引擎／瀏覽器沒有 WebGPU／拿不到顯示卡／建立或執行出錯）
   let hasGpu = false;
-  if (engine !== 'new') why = '舊引擎（相容模式）';
+  if (noGpu) why = 'GPU 停用中（iOS 26 或閃退保護）';
+  else if (engine !== 'new') why = '舊引擎（相容模式）';
   else if (!(self.navigator && self.navigator.gpu)) why = '這個環境沒有 WebGPU';
   else { try { hasGpu = !!(await self.navigator.gpu.requestAdapter()); if (!hasGpu) why = '拿不到 GPU'; } catch (err) { why = '拿不到 GPU：' + (err && err.message ? err.message : err); } }
   if (engine === 'new' && hasGpu) {
@@ -186,10 +187,10 @@ self.onmessage = async (e) => {
   try {
     if (type === 'init') { load(e.data.engine, e.data.threads); ep = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: { engine, ep, threads } }); return; }
     if (!engine) load('old');
-    if (type === 'bench') { self.postMessage({ id, ok: true, result: await bench() }); return; }
+    if (type === 'bench') { self.postMessage({ id, ok: true, result: await bench(e.data.noGpu) }); return; }
     if (type === 'setEP') { ep = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: ep }); return; }
     if (type === 'optRun') { self.postMessage({ id, ok: true, result: await optRun(e.data.model, e.data.ep) }); return; } // 6.2
-    if (type === 'srBench') { self.postMessage({ id, ok: true, result: await srBench(e.data.n) }); return; }
+    if (type === 'srBench') { self.postMessage({ id, ok: true, result: await srBench(e.data.n, e.data.noGpu) }); return; }
     if (type === 'srEP') { srErr = ''; srEP = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: srEP }); return; }
     if (type === 'srTile') {
       let r;

@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.2.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -5222,6 +5222,27 @@ if (settings.aiForceOld) { settings.aiForceOld = false; saveSettings(); aiNote('
 if (settings.aiSafeCPU && settings.aiCrashN == null) { settings.aiSafeCPU = false; settings.aiCrashN = 1; settings.aiBenchV = null; saveSettings(); aiNote('框選閃退保護（舊版一次就永久 CPU）改回可試 GPU'); }
 // 5.1.9：閃退保護定案（一律 CPU）後，更新到新版本時再給一次機會（再中斷一次就又定案）
 else if (settings.aiSafeCPU && settings.aiSafeVer !== APP_VER) { settings.aiSafeCPU = false; settings.aiCrashN = 1; settings.aiBenchV = null; settings.aiBenchN = 0; saveSettings(); aiNote('更新到新版本，框選閃退保護再給一次 GPU 機會'); }
+/* 6.2.2：作者發現一支 iOS 26.7.1 的 iPhone 17（正式版第一次安裝）AI 框選、精修、重新測速幾乎每次閃退回封面（結果有存到），
+   作者自己 iOS 27.2 的 iPhone 17 正常；那支框選 GPU 1224／CPU 1925 毫秒（正常約 220／980）。推測 iOS 26 的 Safari WebGPU（第一代）不穩。
+   作者決定：(乙) iOS 26 以前的 iPhone／iPad 框選、精修一律 CPU、不測 GPU——只有 Safari 的網址列模式看得到版本（Version/26.x）；
+   加到主畫面後 iOS 的 UA 沒有 Version、系統版本也固定寫 18_7，分不出 26 或 27，只能靠 (甲)：
+   (甲) 閃退保護擴大到所有用 GPU 的 AI（單張框選、精修、測速、最佳化的 GPU 那步）：開始前記一筆（AI_GPU_KEY）、做完清掉，
+   下次打開還在＝做到一半閃退 → 跟批次框選同一套（aiCrashN）：第 1 次這次打開先用 CPU，第 2 次這個版本一律 CPU；GPU 順利做完一次歸零 */
+const AI_IOS_VER = (() => {
+  const u = navigator.userAgent;
+  if (!(/iPhone|iPad|iPod/.test(u) || (/Macintosh/.test(u) && navigator.maxTouchPoints > 1))) return null;
+  const m = u.match(/Version\/(\d+)/); return m ? +m[1] : null;
+})();
+const aiOldIOS = AI_IOS_VER != null && AI_IOS_VER <= 26;
+const aiGpuOk = () => !aiOldIOS && !aiSafeNow && !settings.aiSafeCPU;
+const aiGpuWhy = () => (aiOldIOS ? `iOS ${AI_IOS_VER}，一律 CPU` : settings.aiSafeCPU ? '閃退保護，這個版本一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : '');
+const AI_GPU_KEY = 'cocoscan-aigpu';
+let aiGpuJobs = 0, aiSrEPNow = 'wasm';
+function aiGpuMark(d) {
+  aiGpuJobs = Math.max(0, aiGpuJobs + d);
+  try { if (aiGpuJobs > 0) localStorage.setItem(AI_GPU_KEY, String(Date.now())); else localStorage.removeItem(AI_GPU_KEY); } catch (_) {}
+}
+function aiGpuDone() { if (settings.aiCrashN) { settings.aiCrashN = 0; saveSettings(); } } // GPU 順利做完一次：閃退次數歸零
 async function aiCached() { const st = await aiState(); return st.model && !!aiPickEngine(st); }
 const aiUpgradable = (st) => st.model && st.old && !st.neu && !aiOldNow;
 function aiReset() {
@@ -5250,8 +5271,17 @@ function aiBatchMark(on) {
   if (!on && aiEPNow === 'webgpu' && settings.aiCrashN) { settings.aiCrashN = 0; saveSettings(); } // 5.1.7：GPU 順利做完一批，閃退次數歸零
 }
 function aiCrashCheck() {
-  let was = null; try { was = localStorage.getItem(AI_BATCH_KEY); localStorage.removeItem(AI_BATCH_KEY); } catch (_) {}
-  if (!was) return;
+  let was = null, gpu = null;
+  try { was = localStorage.getItem(AI_BATCH_KEY); localStorage.removeItem(AI_BATCH_KEY); gpu = localStorage.getItem(AI_GPU_KEY); localStorage.removeItem(AI_GPU_KEY); } catch (_) {}
+  if (!was && !gpu) return;
+  if (!was) { // 6.2.2：單張框選／精修／測速用 GPU 時中斷
+    settings.aiCrashN = (settings.aiCrashN || 0) + 1; aiSafeNow = true;
+    if (settings.aiCrashN >= 2) { settings.aiEP = 'wasm'; settings.aiSafeCPU = true; settings.aiSafeVer = APP_VER; aiNote('AI 用 GPU 時又中斷（第 2 次），這個版本框選、精修一律用 CPU'); }
+    else aiNote('AI 用 GPU 時中斷（第 1 次），這次先用 CPU，下次打開再試 GPU');
+    saveSettings();
+    setTimeout(() => toast('上次 AI 處理中斷，已改用較穩定的方式'), 1500);
+    return;
+  }
   settings.aiCrashN = (settings.aiCrashN || 0) + 1; aiSafeNow = true; // 5.1.7：這次打開期間先用 CPU
   if (settings.aiCrashN >= 2) { settings.aiEP = 'wasm'; settings.aiSafeCPU = true; settings.aiSafeVer = APP_VER; aiNote('框選又中斷（第 2 次），這個版本一律用 CPU'); }
   else aiNote('框選中斷（第 1 次），這次先用 CPU，下次打開再試 GPU');
@@ -5261,7 +5291,12 @@ function aiCrashCheck() {
 aiCrashCheck();
 function aiPost(payload, transfer) {
   aiLastUse = performance.now();
-  return new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
+  const t = payload.type;
+  const gpu = (t === 'mask' && aiEPNow === 'webgpu') || (t === 'srTile' && aiSrEPNow === 'webgpu') || ((t === 'bench' || t === 'srBench') && !payload.noGpu); // 6.2.2
+  if (gpu) aiGpuMark(1);
+  const p = new Promise((res, rej) => { const id = ++aiSeq; aiPending.set(id, { res, rej }); aiWorker.postMessage(Object.assign({ id }, payload), transfer || []); });
+  if (gpu) p.then((r) => { aiGpuMark(-1); if (t === 'mask' || (t === 'srTile' && aiSrEPNow === 'webgpu')) aiGpuDone(); }, () => aiGpuMark(-1));
+  return p;
 }
 function aiInit() {
   if (aiInitP) return aiInitP;
@@ -5271,11 +5306,11 @@ function aiInit() {
     aiWorker = new Worker('ai-worker.js');
     aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
     aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error('ENGINE:' + (e.message || 'AI 載入失敗'))); aiPending.clear(); aiWorker = null; aiInitP = null; };
-    const r0 = await aiPost({ type: 'init', engine: eng, ep: aiSafeNow ? 'wasm' : settings.aiEP || 'wasm', threads: aiThreadsNow() });
+    const r0 = await aiPost({ type: 'init', engine: eng, ep: aiGpuOk() ? settings.aiEP || 'wasm' : 'wasm', threads: aiThreadsNow() });
     aiEngineNow = eng; aiEPNow = r0 && r0.ep; aiThreadsUsed = (r0 && r0.threads) || 1;
     // 新引擎還沒比較過 CPU／GPU（例如剛下載完、或新版第一次用）：在背景比較一次
     // 5.1.9：比出 CPU（GPU 無法使用或比較慢）就每次打開再比一次，連續 3 次（AI_RETRY）才定案；閃退保護中不比
-    if (eng === 'new' && !settings.aiSafeCPU && (settings.aiBenchV !== AI_NEW_VER || (settings.aiEP !== 'webgpu' && (settings.aiBenchN || 1) < AI_RETRY && !aiBenchedNow))) aiBench();
+    if (eng === 'new' && aiGpuOk() && (settings.aiBenchV !== AI_NEW_VER || (settings.aiEP !== 'webgpu' && (settings.aiBenchN || 1) < AI_RETRY && !aiBenchedNow))) aiBench();
   })();
   aiInitP.catch(() => { aiInitP = null; }); // 載入失敗下次重來
   return aiInitP;
@@ -5285,6 +5320,11 @@ let aiBenchedNow = false, aiBenchP = null;
 function aiBench() { return aiBenchP || (aiBenchP = aiBench0().finally(() => { aiBenchP = null; })); } // 同時叫兩次共用同一次
 async function aiBench0() {
   try {
+    if (!aiGpuOk()) { // 6.2.2：GPU 停用中（iOS 26／閃退保護）只測 CPU，不改框選用法
+      const r = await aiPost({ type: 'bench', noGpu: true });
+      settings.aiBenchR = { cpu: Math.round(r.cpu), gpu: null }; saveSettings(); aiNote(`框選測速：GPU 停用中（${aiGpuWhy()}），只測 CPU`);
+      aiEPNow = await aiPost({ type: 'setEP', ep: 'wasm' }); return;
+    }
     const r = await aiPost({ type: 'bench' });
     const prev = settings.aiBenchV === AI_NEW_VER ? settings.aiEP : null;
     settings.aiEP = !settings.aiSafeCPU && r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm'; // 4.2.1：閃退保護改過 CPU 就不再改回 GPU
@@ -5293,7 +5333,7 @@ async function aiBench0() {
     if (prev && prev !== settings.aiEP) aiNote(`框選重新比較：${prev === 'webgpu' ? 'GPU' : 'CPU'} → ${settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}`);
     aiBenchedNow = true; settings.aiBenchV = AI_NEW_VER; saveSettings();
     console.info('AI bench', r, settings.aiEP);
-    aiEPNow = await aiPost({ type: 'setEP', ep: aiSafeNow ? 'wasm' : settings.aiEP }); // 5.1.7：閃退保護第一次只影響這次打開
+    aiEPNow = await aiPost({ type: 'setEP', ep: aiGpuOk() ? settings.aiEP : 'wasm' }); // 5.1.7：閃退保護第一次只影響這次打開
   } catch (e) { console.warn('AI bench', e); }
 }
 /* 6.2「最佳化 AI 效能」（CPU 多核心）：sw.js 補了跨來源隔離標頭，新引擎可以用多條執行緒。
@@ -5332,7 +5372,7 @@ async function aiOptimize() {
   if (aiOptRunning || !(await aiOptCan())) return false;
   aiOptRunning = true;
   const hc = navigator.hardwareConcurrency || 4, hasTeed = await aiHas([TEED_FILE]);
-  const list = [1, 2, 4].filter((n) => n === 1 || n <= hc), gpuTry = !!navigator.gpu && !settings.aiSafeCPU;
+  const list = [1, 2, 4].filter((n) => n === 1 || n <= hc), gpuTry = !!navigator.gpu && aiGpuOk();
   const per = hasTeed ? 2 : 1, total = list.length * per + (gpuTry ? 1 : 0);
   let done = 0, w = null;
   const step = () => busyProg(`最佳化 AI 效能中…（${Math.min(total, done + 1)}／${total}）\n請不要離開這個畫面`, done / total);
@@ -5363,8 +5403,10 @@ async function aiOptimize() {
     if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset(); // 原本的 AI 引擎先關掉，把記憶體與 CPU 留給測速
     for (const n of list) { const r = await cfg(n); if (r === 'noiso') { done = list.length * per; break; } }
     if (gpuTry) { // GPU 最後測、自己一個 Worker；用不了（null）或出錯都當作沒有 GPU
+      aiGpuMark(1); // 6.2.2：閃退保護
       try { await napMs(500); w = optWorker(1); await w.post({ type: 'init', engine: 'new', ep: 'webgpu', threads: 1 }); step(); R.gpu = await w.post({ type: 'optRun', model: 'u2', ep: 'webgpu' }); }
       catch (e) { R.gpu = null; errs.push('GPU：' + err(e)); }
+      aiGpuMark(-1);
       if (w) { w.end(); w = null; } done++;
     }
     for (const t of errs) aiNote('最佳化失敗 ' + t);
@@ -5669,7 +5711,7 @@ function srInfoText() {
   out.push(`AI 引擎：${aiEngineNow ? (aiEngineNow === 'new' ? '新引擎' : '舊引擎（相容模式）') + `，框選用 ${aiEPNow === 'webgpu' ? 'GPU' : 'CPU'}，CPU ${aiThreadsUsed} 條` : aiOldNow ? '這次用相容模式（尚未載入）' : '尚未載入'}`);
   out.push(`多核心：${aiIso() ? '已隔離' : '未隔離（單核心）'}・核心 ${navigator.hardwareConcurrency || '?'}・${settings.aiOptV === AI_OPT_V ? `已最佳化 ${settings.aiThreads || 1} 條` : '尚未最佳化'}`); // 6.2
   const ab = settings.aiBenchR, abN = settings.aiBenchN || 1;
-  out.push(`框選：${settings.aiSafeCPU ? '閃退保護，這個版本一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}` +
+  out.push(`框選：${aiGpuOk() ? (settings.aiEP === 'webgpu' ? 'GPU' : 'CPU') : aiGpuWhy()}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}` +
     (ab ? `（比較 CPU ${ab.cpu}、${ab.gpu != null ? 'GPU ' + ab.gpu : 'GPU 無法使用'}${settings.aiEP !== 'webgpu' && !settings.aiSafeCPU ? `；第 ${abN} 次，${abN >= AI_RETRY ? '已定案' : '下次打開再比'}` : ''}）` : ''));
   if (b && b.v === SR_BENCH_V && b.ms > 0) {
     const why = b.gpu != null ? `GPU ${b.gpu}` : `GPU 無法使用${b.gpuWhy ? '：' + b.gpuWhy : ''}`;
@@ -5681,12 +5723,14 @@ function srInfoText() {
 }
 async function srBenchNow(force) {
   const b = settings.srBench;
+  // 6.2.2：GPU 停用中（iOS 26／閃退保護）：有測過就用 CPU 的數字，不重測 GPU；沒測過或按重新測速才只測 CPU
+  if (!aiGpuOk() && !force && b && b.v === SR_BENCH_V && b.cpu > 0) return Object.assign({}, b, { ep: 'wasm', ms: b.cpu });
   // 5.1.7：GPU 的結果沿用；CPU 的結果每次打開第一次精修重測，連續 SR_RETRY 次才定案
   if (!force && b && b.v === SR_BENCH_V && b.ms > 0 && (b.ep === 'webgpu' || (b.n || 1) >= SR_RETRY || srBenchedNow)) return b;
   busy('正在測試這支手機的速度…');
   try {
     if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset(); // 5.1.6：重開 AI 引擎，框選、TEED 的記憶體都清掉再測
-    const r = await aiCall({ type: 'srBench', n: SR_IN });
+    const r = await aiCall({ type: 'srBench', n: SR_IN, noGpu: !aiGpuOk() });
     const ep = r.gpu != null && r.gpu < r.cpu * 0.8 ? 'webgpu' : 'wasm';
     const n = ep === 'webgpu' || force ? 1 : b && b.v === SR_BENCH_V && b.ep === 'wasm' ? (b.n || 1) + 1 : 1;
     srBenchedNow = true;
@@ -5728,7 +5772,7 @@ async function srRun(page) {
   const out = canvasOf(OW, OH), ox = out.getContext('2d'); ox.imageSmoothingQuality = 'high';
   const tmp = canvasOf(SR_IN * 4, SR_IN * 4), tx = tmp.getContext('2d');
   const nx = Math.ceil(sw / SR_TILE), ny = Math.ceil(sh / SR_TILE), total = nx * ny;
-  await aiCall({ type: 'srEP', ep: (settings.srBench && settings.srBench.ep) || 'wasm' });
+  aiSrEPNow = await aiCall({ type: 'srEP', ep: aiGpuOk() ? (settings.srBench && settings.srBench.ep) || 'wasm' : 'wasm' }); // 6.2.2
   const t0 = performance.now(); let done = 0;
   try {
     for (let ty = 0; ty < ny; ty++) for (let txi = 0; txi < nx; txi++) {
@@ -5865,6 +5909,7 @@ const CHANGELOG = [
     { t: '翻頁加上翻書動畫', since: '6.1' },
     { t: '手機橫放時可一次顯示兩頁，並可設定左頁及右頁顯示', since: '6.1.2' },
     { t: '導入CPU多核心，最佳化提升AI框選性能（設定中可重新最佳化）。重新開啟 App 後可進行最佳化', since: '6.2' },
+    { t: '修正部分 iPhone（iOS 26）使用 AI 框選、精修時閃退', since: '6.2.2' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
