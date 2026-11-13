@@ -37,11 +37,15 @@ const $ = (s) => document.querySelector(s);
 const log = (m) => {  const l = $('#log'); l.textContent += m + '\n'; l.scrollTop = l.scrollHeight; };
 (async () => {
   // 第一次打開還沒有 Service Worker 接手：註冊後重新整理一次
-  if ('serviceWorker' in navigator && !navigator.serviceWorker.controller) {
+  // 這一頁可能已經被 App 的 Service Worker 管著（沒有隔離標頭）：一律註冊測速頁自己的，等它啟用後重新整理一次
+  if ('serviceWorker' in navigator && !self.crossOriginIsolated) {
     try {
-      await navigator.serviceWorker.register('./coi-sw.js', { scope: './' });
-      await navigator.serviceWorker.ready;
-      if (!sessionStorage.getItem('coiReload')) { sessionStorage.setItem('coiReload', '1'); location.reload(); return; }
+      const reg = await navigator.serviceWorker.register('./coi-sw.js', { scope: './' });
+      const sw = reg.installing || reg.waiting || reg.active;
+      if (sw && sw.state !== 'activated') await new Promise((r) => sw.addEventListener('statechange', () => { if (sw.state === 'activated') r(); }));
+      const n = +(sessionStorage.getItem('coiReload') || 0);
+      if (n < 2) { sessionStorage.setItem('coiReload', n + 1); location.reload(); return; }
+      log('重新整理後仍沒有隔離（測速頁的 Service Worker：' + ((navigator.serviceWorker.controller || {}).scriptURL || '沒有') + '）');
     } catch (e) { log('Service Worker 註冊失敗：' + e.message); }
   }
   const iso = self.crossOriginIsolated === true, sab = typeof SharedArrayBuffer !== 'undefined', hc = navigator.hardwareConcurrency || '?';
