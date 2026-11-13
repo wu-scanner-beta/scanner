@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.1.5'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -521,7 +521,7 @@ function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2400);
 }
-function busy(msg) { $('#busyMsg').textContent = msg || '處理中…'; $('#busy').classList.add('show'); }
+function busy(msg) { $('#busyMsg').textContent = msg || '處理中…'; $('#busyBar').classList.remove('on'); $('#busy').classList.add('show'); }
 function unbusy() { $('#busy').classList.remove('show'); }
 let sheetOpenAt = 0;
 function openSheet(html, bind) {
@@ -4943,6 +4943,8 @@ $('#btnSettings').onclick = () => {
     <div class="switch"><span>拍攝動畫<small id="animNote">即時掃描拍下時的攤平、掃描光動畫；手機較舊覺得卡可以關掉</small></span><button class="tg ${animPref() ? 'on' : ''}" id="setAnim"></button></div>
     <div class="switch"><span>拍攝音效<small>快門聲與掃描音效，跟著手機音量（iPhone 開靜音時不會響）</small></span><button class="tg ${settings.sound !== false ? 'on' : ''}" data-k="sound"></button></div>
     <button class="srow" id="setAiUp" style="display:none"><span>有可升級的AI 引擎，點擊升級 ›<span class="sub">AI 框選速度更快，需要下載約 ${AI_UP_MB} MB</span></span></button>
+    <button class="srow" id="setAiOpt" style="display:none"><span>有可最佳化的 AI 效能，點擊最佳化 ›<span class="sub">導入 CPU 多核心，讓 AI 框選更快，約需 10～40 秒</span></span></button>
+    <button class="srow" id="setAiReopt" style="display:none;font-size:14px;padding:8px 12px"><span>重新最佳化 AI 效能 ›<span class="sub" id="setAiReoptSub"></span></span></button>
     ${IS_IOS
     ? '<div class="note" style="margin:10px 2px 4px">橫拿拍攝：請關閉螢幕方向鎖定，直接橫拿就可以拍。</div>'
     : !hasMotion() ? '' : `<div class="switch"><span>橫拿拍攝<small>橫拿時按鈕跟著轉、拍好的頁自動轉正</small></span><button class="tg ${settings.landscape !== false ? 'on' : ''}" data-k="landscape"></button></div>`}
@@ -4956,7 +4958,7 @@ $('#btnSettings').onclick = () => {
     <button class="srow" id="setLog"><span>更新日誌 ›<span class="sub">目前版本 v${APP_VER}</span></span></button>
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
-    <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成金色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
+    <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成淡藍色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
     <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速（精修與框選）</span></button><button class="srow" id="aiUnsafe" style="${settings.aiSafeCPU || settings.aiCrashN ? '' : 'display:none'}"><span>解除框選閃退保護</span></button></div>
     <div class="note" id="setVer" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     // 5.0：隱藏區（TEED 協助標記開關、AI 診斷）。5.1.9 起入口改在更新日誌的「目前版本」連點 5 下（logCurrent），這裡不再能點
@@ -4986,11 +4988,21 @@ $('#btnSettings').onclick = () => {
       el.textContent = !ok ? `即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選。尚未下載 AI 資料（約 ${AI_DL_MB} MB），打開時會詢問下載`
         : '即時掃描、高畫質拍照、相簿匯入都自動用 AI 框選。AI 資料已下載，離線也能用';
       if (up) up.style.display = aiUpgradable(st) ? '' : 'none';
+      // 6.2：最佳化 AI 效能（沒有隔離或沒有新引擎時兩行都不顯示）
+      const can = await aiOptCan(), optd = settings.aiOptV === AI_OPT_V, o = settings.aiOptR;
+      const a = s.querySelector('#setAiOpt'), b = s.querySelector('#setAiReopt');
+      if (a) a.style.display = can && !optd ? '' : 'none';
+      if (b) b.style.display = can && optd ? '' : 'none';
+      const sub = s.querySelector('#setAiReoptSub');
+      if (sub && o) sub.textContent = `目前：AI 框選用 ${o.gpu ? 'GPU' : `CPU ${o.n} 核心`}；覺得變慢時可以重測`;
     };
     aiStat();
     s.querySelector('#setAiUp').onclick = async () => {
       if (await aiUpgrade()) { aiStat(); toast('AI 引擎已升級'); }
     };
+    const optGo = async () => { closeSheet(); await aiOptimize(); };
+    s.querySelector('#setAiOpt').onclick = optGo;
+    s.querySelector('#setAiReopt').onclick = optGo;
     // 3.1 拍攝動畫：沒設定過時弱 Android 預設關；系統開了「減少動態效果」一律不播
     if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) s.querySelector('#animNote').textContent = '手機已開啟「減少動態效果」，動畫不會播放';
     s.querySelector('#setAnim').onclick = () => { settings.capAnim = !animPref(); saveSettings(); s.querySelector('#setAnim').classList.toggle('on', settings.capAnim); };
@@ -5054,6 +5066,7 @@ $('#cvStart').onclick = () => {
   try { seen = localStorage.getItem('cocoscan-help-seen') === '1'; localStorage.setItem('cocoscan-help-seen', '1'); } catch (_) {}
   if (!seen) { openHelp(); logMarkSeen(); } // 第一次使用：只跳教學，日誌視為已看過
   else if (hasNewLog()) setTimeout(showChangelog, 300);
+  else setTimeout(() => aiOptAsk().catch(() => {}), 600); // 6.2：日誌那次不問（那次通常還沒隔離），下次進來再問
 };
 $('#btnHelp').onclick = () => openHelp();
 $('#homeCover').onclick = () => goCover();
@@ -5258,8 +5271,8 @@ function aiInit() {
     aiWorker = new Worker('ai-worker.js');
     aiWorker.onmessage = (e) => { const p = aiPending.get(e.data.id); if (!p) return; aiPending.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
     aiWorker.onerror = (e) => { for (const p of aiPending.values()) p.rej(new Error('ENGINE:' + (e.message || 'AI 載入失敗'))); aiPending.clear(); aiWorker = null; aiInitP = null; };
-    const r0 = await aiPost({ type: 'init', engine: eng, ep: aiSafeNow ? 'wasm' : settings.aiEP || 'wasm' });
-    aiEngineNow = eng; aiEPNow = r0 && r0.ep;
+    const r0 = await aiPost({ type: 'init', engine: eng, ep: aiSafeNow ? 'wasm' : settings.aiEP || 'wasm', threads: aiThreadsNow() });
+    aiEngineNow = eng; aiEPNow = r0 && r0.ep; aiThreadsUsed = (r0 && r0.threads) || 1;
     // 新引擎還沒比較過 CPU／GPU（例如剛下載完、或新版第一次用）：在背景比較一次
     // 5.1.9：比出 CPU（GPU 無法使用或比較慢）就每次打開再比一次，連續 3 次（AI_RETRY）才定案；閃退保護中不比
     if (eng === 'new' && !settings.aiSafeCPU && (settings.aiBenchV !== AI_NEW_VER || (settings.aiEP !== 'webgpu' && (settings.aiBenchN || 1) < AI_RETRY && !aiBenchedNow))) aiBench();
@@ -5283,6 +5296,93 @@ async function aiBench0() {
     aiEPNow = await aiPost({ type: 'setEP', ep: aiSafeNow ? 'wasm' : settings.aiEP }); // 5.1.7：閃退保護第一次只影響這次打開
   } catch (e) { console.warn('AI bench', e); }
 }
+/* 6.2「最佳化 AI 效能」（CPU 多核心）：sw.js 補了跨來源隔離標頭，新引擎可以用多條執行緒。
+   每種條數（1／2／4，看手機核心數）各開一個新的 ai-worker，AI 框選（u2）與 TEED 各跑兩次取快的；再比 AI 框選用 GPU。
+   作者實測（測速頁）：Y31 2 條最快（框選 3.75→1.94 秒、TEED 0.81→0.50 秒），3 條以上反而變慢（大小核）；iPhone 4 條 TEED 0.20→0.14 秒，框選仍是 GPU 最快。
+   作者決定：不在背景跑（怕預期外的發燙、卡頓），由使用者按下後專心等進度條——
+     舊使用者：更新後（有隔離的那次）從封面進主畫面時詢問一次；按「稍後」在設定 AI 那欄點「有可最佳化的 AI 效能」；做完後那欄留「重新最佳化 AI 效能」
+     新使用者：下載 AI 資料的進度跑完接著最佳化（不在即時掃描畫面裡做，相機開著會搶 CPU；那時照舊在背景比 CPU／GPU，下次打開再詢問）
+   沒有隔離（第一次打開、瀏覽器不支援）或舊引擎：照舊 1 條。原本「比出 CPU 就之後 3 次打開再比」照常，CPU 那邊自動用選定的條數 */
+const AI_OPT_V = 1;
+let aiThreadsUsed = 1, aiOptRunning = false;
+const aiIso = () => self.crossOriginIsolated === true;
+function aiThreadsNow() { return aiIso() && settings.aiOptV === AI_OPT_V && settings.aiThreads > 1 ? settings.aiThreads : 1; }
+async function aiOptCan() { if (!aiIso() || aiOldNow) return false; const st = await aiState(); return !!(st.model && st.neu); }
+async function aiOptNeeded() { return settings.aiOptV !== AI_OPT_V && (await aiOptCan()); }
+// 進度條：沿用 #busy，加一條橫條（busy() 會把它藏起來）
+function busyProg(msg, p) { busy(msg); const b = $('#busyBar'); b.classList.add('on'); b.firstElementChild.style.width = Math.round(Math.max(0, Math.min(1, p)) * 100) + '%'; }
+function optWorker(threads) {
+  const w = new Worker('ai-worker.js'), pend = new Map(); let seq = 0;
+  const fail = (m) => { for (const p of pend.values()) p.rej(new Error(m)); pend.clear(); };
+  w.onmessage = (e) => { const p = pend.get(e.data.id); if (!p) return; pend.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
+  w.onerror = (e) => fail(e.message || 'AI 載入失敗');
+  const post = (o) => new Promise((res, rej) => { const id = ++seq; pend.set(id, { res, rej }); w.postMessage(Object.assign({ id }, o)); });
+  return { post, end: () => { fail('結束'); w.terminate(); } };
+}
+async function aiOptimize() {
+  if (aiOptRunning || !(await aiOptCan())) return false;
+  aiOptRunning = true;
+  const hc = navigator.hardwareConcurrency || 4, hasTeed = await aiHas([TEED_FILE]);
+  const list = [1, 2, 4].filter((n) => n === 1 || n <= hc), gpuTry = !!navigator.gpu && !settings.aiSafeCPU;
+  const total = list.length * (hasTeed ? 2 : 1) + (gpuTry ? 1 : 0);
+  let done = 0, w = null;
+  const step = () => busyProg(`最佳化 AI 效能中…（${done + 1}／${total}）\n請不要離開這個畫面`, done / total);
+  const R = { u2: {}, td: {}, gpu: null };
+  try {
+    if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset(); // 原本的 AI 引擎先關掉，把記憶體與 CPU 留給測速
+    for (const n of list) {
+      w = optWorker(n);
+      const r0 = await w.post({ type: 'init', engine: 'new', ep: 'wasm', threads: n });
+      if (n > 1 && r0.threads !== n) { w.end(); w = null; break; } // 這個 Worker 沒有隔離：多條測不了
+      step(); R.u2[n] = await w.post({ type: 'optRun', model: 'u2', ep: 'wasm' }); done++;
+      if (hasTeed) { step(); R.td[n] = await w.post({ type: 'optRun', model: 'teed', ep: 'wasm' }); done++; }
+      if (n === 1 && gpuTry) { step(); R.gpu = await w.post({ type: 'optRun', model: 'u2', ep: 'webgpu' }); done++; }
+      w.end(); w = null;
+    }
+    busyProg('最佳化 AI 效能中…', 1);
+    const ns = Object.keys(R.u2).map(Number);
+    const cpuBest = Math.min(...ns.map((n) => R.u2[n]));
+    const gpuOk = R.gpu != null && R.gpu < cpuBest * 0.8;
+    const score = (n) => (gpuOk ? 0 : R.u2[n]) + (R.td[n] || 0);
+    const best = Math.min(...ns.map(score));
+    const n = ns.find((k) => score(k) <= best * 1.1); // 差不到 10% 選條數少的（較不發燙）
+    const prevEP = settings.aiEP === 'webgpu' ? 'webgpu' : 'wasm', prevN = R.u2[aiThreadsNow()] != null ? aiThreadsNow() : 1;
+    const before = { ai: prevEP === 'webgpu' && R.gpu != null ? R.gpu : R.u2[prevN], td: R.td[prevN] };
+    const after = { ai: gpuOk ? R.gpu : R.u2[n], td: R.td[n] };
+    const prevBenchEP = settings.aiBenchV === AI_NEW_VER ? settings.aiEP : null;
+    settings.aiEP = gpuOk ? 'webgpu' : 'wasm';
+    settings.aiBenchN = gpuOk ? 0 : prevBenchEP === 'wasm' ? (settings.aiBenchN || 1) + 1 : 1; // 跟 aiBench0 一樣算一次比較
+    settings.aiBenchR = { cpu: Math.round(R.u2[n]), gpu: R.gpu != null ? Math.round(R.gpu) : null };
+    settings.aiBenchV = AI_NEW_VER; aiBenchedNow = true;
+    settings.aiThreads = n; settings.aiOptV = AI_OPT_V; settings.aiOptAsked = true;
+    settings.aiOptR = { n, gpu: gpuOk, u2: R.u2, td: R.td, g: R.gpu, before, after };
+    aiNote(`最佳化 AI 效能：框選 ${gpuOk ? 'GPU' : 'CPU ' + n + ' 條'}、TEED ${n} 條（${ns.map((k) => `${k} 條 ${Math.round(R.u2[k])}/${R.td[k] != null ? Math.round(R.td[k]) : '-'}`).join('、')}${R.gpu != null ? `、GPU ${Math.round(R.gpu)}` : ''}）`);
+    saveSettings(); aiReset(); unbusy(); aiOptRunning = false;
+    aiOptShow(before, after, gpuOk, n);
+    return true;
+  } catch (e) {
+    if (w) w.end();
+    unbusy(); aiOptRunning = false; console.warn('AI opt', e);
+    toast('最佳化沒有完成，可以在設定的 AI 那欄再試一次');
+    return false;
+  }
+}
+const secOf = (ms) => (ms >= 1000 ? (ms / 1000).toFixed(1) + ' 秒' : Math.round(ms) + ' 毫秒');
+function aiOptShow(before, after, gpu, n) {
+  const line = (name, a, b) => { if (a == null || b == null) return ''; const x = a / b; return x >= 1.1 ? `<div>${name}：${secOf(a)} → ${secOf(b)}（快 ${x.toFixed(1)} 倍）</div>` : `<div>${name}：${secOf(b)}（原本的方式已是最快）</div>`; };
+  const body = line('AI 框選', before.ai, after.ai) + line('TEED 輔助框選', before.td, after.td);
+  openSheet(`<h3>AI 效能最佳化完成</h3><div class="note" style="margin:2px 4px 14px;font-size:14.5px;line-height:1.7">${body}<div style="opacity:.75;font-size:13px;margin-top:6px">這支手機：${gpu ? `AI 框選用 GPU${n > 1 ? `，輔助用 CPU ${n} 核心` : ''}` : `AI 框選與輔助都用 CPU ${n} 核心`}</div></div>
+    <button class="bigbtn" id="optOk" style="width:100%">好</button>`, (s) => { s.querySelector('#optOk').onclick = () => closeSheet(); });
+}
+// 從封面進主畫面時：還沒最佳化、有新 AI 引擎、這次有隔離，問一次（按「稍後」之後只在設定裡出現）
+async function aiOptAsk() {
+  if (settings.aiOptAsked || !(await aiOptNeeded()) || current !== 'home' || $('#sheetWrap').classList.contains('show')) return;
+  settings.aiOptAsked = true; saveSettings();
+  const yes = await askSheet('最佳化 AI 效能', '6.2 版導入 CPU 多核心，可以讓 AI 框選更快。<br>將測試這支手機跑 AI 最快的方式，約需 10～40 秒，測試時請不要離開這個畫面。', '開始最佳化', '稍後');
+  if (yes) await aiOptimize();
+  else toast('之後可以在設定的 AI 那欄最佳化');
+}
+
 // 送一個工作給 AI；新引擎載入失敗（ENGINE:）時啟動安全網：改用舊引擎再試一次
 async function aiCall(payload, transfer, retried) {
   const keep = payload.buffer ? payload.buffer.slice(0) : null; // 送出時 buffer 會被轉走，重試要用備份
@@ -5337,6 +5437,7 @@ async function aiEnsure(inApp, noAsk, what) {
   if (!(await aiDownload(need, '下載 AI 資料中…'))) return false;
   aiOldNow = false; settings.aiBenchV = null; saveSettings();
   await aiDropOld(); aiReset();
+  if (current !== 'live' && aiIso()) await aiOptimize(); // 6.2：下載完接著最佳化（使用者本來就在等進度條）
   return true;
 }
 // 舊使用者升級成新引擎（拍攝畫面的詢問、設定裡的按鈕）
@@ -5344,6 +5445,7 @@ async function aiUpgrade() {
   if (!(await aiDownload(AI_NEW, '升級 AI 引擎中…'))) return false;
   aiOldNow = false; settings.aiBenchV = null; settings.aiUpAsked = true; saveSettings();
   await aiDropOld(); aiReset();
+  if (current !== 'live' && aiIso()) { await aiOptimize(); return true; } // 6.2：設定裡升級完接著最佳化
   aiInit().catch(() => {}); // 載入新引擎並在背景比較 CPU／GPU
   return true;
 }
@@ -5533,7 +5635,8 @@ const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt
 // 5.1.7：隱藏區的 AI 診斷（引擎、GPU 狀態與原因、精修速度、框選、最近紀錄）
 function srInfoText() {
   const b = settings.srBench, L = settings.srLast, out = [];
-  out.push(`AI 引擎：${aiEngineNow ? (aiEngineNow === 'new' ? '新引擎' : '舊引擎（相容模式）') + `，框選用 ${aiEPNow === 'webgpu' ? 'GPU' : 'CPU'}` : aiOldNow ? '這次用相容模式（尚未載入）' : '尚未載入'}`);
+  out.push(`AI 引擎：${aiEngineNow ? (aiEngineNow === 'new' ? '新引擎' : '舊引擎（相容模式）') + `，框選用 ${aiEPNow === 'webgpu' ? 'GPU' : 'CPU'}，CPU ${aiThreadsUsed} 條` : aiOldNow ? '這次用相容模式（尚未載入）' : '尚未載入'}`);
+  out.push(`多核心：${aiIso() ? '已隔離' : '未隔離（單核心）'}・核心 ${navigator.hardwareConcurrency || '?'}・${settings.aiOptV === AI_OPT_V ? `已最佳化 ${settings.aiThreads || 1} 條` : '尚未最佳化'}`); // 6.2
   const ab = settings.aiBenchR, abN = settings.aiBenchN || 1;
   out.push(`框選：${settings.aiSafeCPU ? '閃退保護，這個版本一律 CPU' : aiSafeNow ? '閃退保護，這次先用 CPU' : settings.aiEP === 'webgpu' ? 'GPU' : 'CPU'}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}` +
     (ab ? `（比較 CPU ${ab.cpu}、${ab.gpu != null ? 'GPU ' + ab.gpu : 'GPU 無法使用'}${settings.aiEP !== 'webgpu' && !settings.aiSafeCPU ? `；第 ${abN} 次，${abN >= AI_RETRY ? '已定案' : '下次打開再比'}` : ''}）` : ''));
@@ -5730,6 +5833,7 @@ const CHANGELOG = [
     { t: '即時掃描也支援雙頁模式', since: '6.1' },
     { t: '翻頁加上翻書動畫', since: '6.1' },
     { t: '手機橫放時可一次顯示兩頁，並可設定左頁及右頁顯示', since: '6.1.2' },
+    { t: '導入CPU多核心，最佳化提升AI框選性能（設定中可重新最佳化）', since: '6.2' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號

@@ -4,20 +4,23 @@
    3.0：兩種引擎（app.js 用 init 指定，同一個 Worker 只載入一種）
      new＝ONNX Runtime Web 1.30.0（ort.webgpu.min.js＋ort-wasm-simd-threaded.asyncify.mjs／.wasm），可用 GPU（WebGPU）或 CPU
      old＝1.17.3（ort.wasm.min.js＋ort-wasm-simd.wasm），只有 CPU；新引擎載入失敗時的安全網、還沒升級的舊使用者
-   ep＝'webgpu' 或 'wasm'（app.js 依 bench 結果決定）；GPU 建立或執行出錯時，這個 Worker 之後都改用 CPU */
+   ep＝'webgpu' 或 'wasm'（app.js 依 bench 結果決定）；GPU 建立或執行出錯時，這個 Worker 之後都改用 CPU
+   6.2：跨來源隔離（sw.js 補標頭）時新引擎可用多執行緒：init 的 threads（app.js 的「最佳化 AI 效能」選出，Y31 實測 2 條快約 1.9 倍）；
+     沒有隔離或舊引擎一律 1 條。ONNX Runtime 的條數只能在第一次建立前設定，所以每種條數要開新的 Worker（optRun 測速用） */
 const MODEL = new URL('lib/ai/u2netp.onnx', self.location.href).href;
 const MEAN = [0.485, 0.456, 0.406], STD = [0.229, 0.224, 0.225];
 const N = 320 * 320;
-let engine = null, ep = 'wasm', sess = null, sessEP = null;
+let engine = null, ep = 'wasm', sess = null, sessEP = null, threads = 1;
 
 // 引擎載入失敗的錯誤前面加 ENGINE:，app.js 看到就改用舊引擎
-function load(eng) {
+function load(eng, want) {
   if (engine) return;
   try {
     self.importScripts(eng === 'new' ? 'lib/ai/ort.webgpu.min.js' : 'lib/ai/ort.wasm.min.js');
   } catch (err) { throw new Error('ENGINE:' + (err && err.message ? err.message : String(err))); }
   ort.env.wasm.wasmPaths = new URL('lib/ai/', self.location.href).href; // 要完整網址，相對路徑會被當成模組名稱
-  ort.env.wasm.numThreads = 1;
+  threads = eng === 'new' && self.crossOriginIsolated === true && want > 1 ? Math.min(8, want | 0) : 1; // 6.2
+  ort.env.wasm.numThreads = threads;
   if (eng === 'old') ort.env.wasm.simd = true;
   engine = eng;
 }
@@ -94,6 +97,25 @@ async function bench() {
   return { cpu, gpu };
 }
 
+/* 6.2「最佳化 AI 效能」：在這個 Worker（固定條數）建一個工作，跑兩次取快的（第一次含準備時間），回傳毫秒；GPU 用不了回傳 null。
+   model：'u2'（AI 框選，320×320）或 'teed'（640×480，跟即時掃描與框選用的大小相同）。測完就釋放 */
+async function optRun(model, want) {
+  if (want === 'webgpu') {
+    if (engine !== 'new') return null;
+    try { if (!(self.navigator && self.navigator.gpu && (await self.navigator.gpu.requestAdapter()))) return null; } catch (_) { return null; }
+  }
+  const u2 = model === 'u2', w = u2 ? 320 : 640, h = u2 ? 320 : 480;
+  const f = new Float32Array(3 * w * h).fill(u2 ? 0.1 : 20);
+  let s;
+  try { s = await mkSess(u2 ? MODEL : TEED_MODEL, want); } catch (err) { if (want === 'webgpu') return null; throw err; }
+  let best = Infinity;
+  try {
+    for (let k = 0; k < 2; k++) { const tm = {}; await qRun(s, { [s.inputNames[0]]: new ort.Tensor('float32', f, [1, 3, h, w]) }, tm); best = Math.min(best, tm.ms); }
+  } catch (err) { await qRel(s); if (want === 'webgpu') return null; throw err; }
+  await qRel(s);
+  return best;
+}
+
 /* 4.1：AI 精修（Real-ESRGAN animevideov3「線稿」模型，2.5 MB，BSD-3）。app.js 把拉正後的頁面縮小、切成固定大小的塊送來，
    每塊 SR_IN×SR_IN（RGBA）→ 放大 4 倍的 RGBA；接縫由 app.js 多讀邊緣處理。和框選用不同的 session，GPU／CPU 各自選（srEP） */
 const SR_MODEL = new URL('lib/ai/sr-anime.onnx', self.location.href).href;
@@ -162,10 +184,11 @@ async function teedRun(buffer, w, h) {
 self.onmessage = async (e) => {
   const { id, type } = e.data;
   try {
-    if (type === 'init') { load(e.data.engine); ep = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: { engine, ep } }); return; }
+    if (type === 'init') { load(e.data.engine, e.data.threads); ep = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: { engine, ep, threads } }); return; }
     if (!engine) load('old');
     if (type === 'bench') { self.postMessage({ id, ok: true, result: await bench() }); return; }
     if (type === 'setEP') { ep = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: ep }); return; }
+    if (type === 'optRun') { self.postMessage({ id, ok: true, result: await optRun(e.data.model, e.data.ep) }); return; } // 6.2
     if (type === 'srBench') { self.postMessage({ id, ok: true, result: await srBench(e.data.n) }); return; }
     if (type === 'srEP') { srErr = ''; srEP = engine === 'new' && e.data.ep === 'webgpu' ? 'webgpu' : 'wasm'; self.postMessage({ id, ok: true, result: srEP }); return; }
     if (type === 'srTile') {
