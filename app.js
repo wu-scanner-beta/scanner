@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.1.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.1.3'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -1888,23 +1888,24 @@ function drawOverlay() {
     ctx.globalAlpha = live.fade;
     ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]))); ctx.closePath();
     // 綠色隨倒數逐漸變濃
-    const gold = settings.teedMark && live.lockSrc === 'teed' && !live.edge; // 5.0：TEED 協助標記開著時，TEED 找到的框用金色
-    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : gold ? `rgba(255,200,40,${0.12 + 0.3 * pr})` : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
+    // 6.1.3：雙頁模式用金色框（作者：跟單頁的綠框有區別）；TEED 協助標記（測試用，5.0 原本是金色）改成淡藍色
+    const tmark = settings.teedMark && live.lockSrc === 'teed' && !live.edge, gold = !!settings.spread && !live.edge;
+    ctx.fillStyle = live.edge ? 'rgba(242,196,141,.18)' : tmark ? `rgba(126,200,242,${0.12 + 0.3 * pr})` : gold ? `rgba(255,200,40,${0.12 + 0.3 * pr})` : `rgba(143,179,138,${0.12 + 0.3 * pr})`;
     ctx.fill();
     ctx.lineWidth = 3 + pr; ctx.lineJoin = 'round';
-    ctx.strokeStyle = live.edge ? '#F2C48D' : gold ? '#FFC828' : '#A8D4A1';
+    ctx.strokeStyle = live.edge ? '#F2C48D' : tmark ? '#7EC8F2' : gold ? '#FFC828' : '#A8D4A1';
     ctx.stroke();
     ctx.fillStyle = '#fff';
     pts.forEach((p) => { ctx.beginPath(); ctx.arc(p[0], p[1], 5, 0, 7); ctx.fill(); });
     ctx.globalAlpha = 1;
     if (settings.spread) drawSpreadLine(ctx, R, live.shown, live.fade, ctx.strokeStyle); // 6.1：書溝線（還沒找到時畫中間虛線）
     // 5.1 聚焦：框的中央一個圓環跟著穩定進度填滿，填滿就拍（拍攝動畫關閉時不畫）
-    if (settings.autoShutter && live.armed && !live.edge && pr > 0 && animOn()) centerRing(ctx, [pts.reduce((a, p) => a + p[0], 0) / 4, pts.reduce((a, p) => a + p[1], 0) / 4], pr, null, gold ? '#FFC828' : '#7ED67E', live.fade);
+    if (settings.autoShutter && live.armed && !live.edge && pr > 0 && animOn()) centerRing(ctx, [pts.reduce((a, p) => a + p[0], 0) / 4, pts.reduce((a, p) => a + p[1], 0) / 4], pr, null, tmark ? '#7EC8F2' : gold ? '#FFC828' : '#7ED67E', live.fade);
   }
   // 5.1 倒數拍攝：畫面中央的圓環，中間顯示 5～1
   if (live.cd && live.cdT0 != null && !live.capturing) {
     const el = performance.now() - live.cdT0;
-    centerRing(ctx, [R.x + R.w / 2, R.y + R.h / 2], Math.min(1, el / CD_LEN), Math.max(1, Math.ceil((CD_LEN - el) / 1000)), '#7ED67E', 1);
+    centerRing(ctx, [R.x + R.w / 2, R.y + R.h / 2], Math.min(1, el / CD_LEN), Math.max(1, Math.ceil((CD_LEN - el) / 1000)), settings.spread ? '#FFC828' : '#7ED67E', 1);
   }
   requestAnimationFrame(drawOverlay);
 }
@@ -2326,6 +2327,7 @@ function updateLiveBtns() {
   $('#aiBtn').classList.toggle('on', !!settings.autoAI);
   $('#cdBtn').classList.toggle('on', !!settings.countdown); $('#cdBtn').style.display = settings.autoShutter ? '' : 'none'; // 5.1：手動拍攝時隱藏，開關狀態不變
   $('#autoBtn').classList.toggle('on', settings.autoShutter);
+  $('#spreadBtn').classList.toggle('on', !!settings.spread); // 6.1.3
   $('#autoBtn').textContent = settings.autoShutter ? '自動拍攝' : '手動拍攝';
   $('#cropModeBtn').textContent = settings.cropLater ? '稍後裁切' : '立即裁切';
   $('#cropModeBtn').classList.toggle('later', !!settings.cropLater);
@@ -2346,6 +2348,14 @@ $('#cropModeBtn').onclick = () => {
   else liveTip('立即裁切', '每拍一張就進入裁切畫面<br>完成後自動回到拍攝'); // 5.3.1：不用再按確定
 };
 $('#liveClose').onclick = () => finishLive();
+// 6.1.3：拍攝中也能切換雙頁（作者：框選方式不一樣，拍到一半不用跳出去切）。立即生效：清掉目前的框、倒數、書溝；已拍的頁不變；主畫面、連拍的開關同步
+$('#spreadBtn').onclick = () => {
+  sfxPrime();
+  settings.spread = !settings.spread; saveSettings(); paintHomeModes();
+  cdStop(); resetLock(); live.gutter = null; live.best = null; live.sus = false; live.tChk = null; live.miss = 0;
+  updateLiveBtns();
+  liveTip(settings.spread ? '雙頁模式' : '單頁模式', settings.spread ? '框整本書（金色框），拍下後<br>自動拆成左右兩頁' : '已改回單頁模式（綠色框）');
+};
 $('#cdBtn').onclick = () => {
   sfxPrime();
   settings.countdown = !settings.countdown; saveSettings(); cdStop(); updateLiveBtns();
