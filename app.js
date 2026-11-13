@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.2'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2.1'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -5315,30 +5315,60 @@ function optWorker(threads) {
   const w = new Worker('ai-worker.js'), pend = new Map(); let seq = 0;
   const fail = (m) => { for (const p of pend.values()) p.rej(new Error(m)); pend.clear(); };
   w.onmessage = (e) => { const p = pend.get(e.data.id); if (!p) return; pend.delete(e.data.id); e.data.ok ? p.res(e.data.result) : p.rej(new Error(e.data.error)); };
-  w.onerror = (e) => fail(e.message || 'AI 載入失敗');
-  const post = (o) => new Promise((res, rej) => { const id = ++seq; pend.set(id, { res, rej }); w.postMessage(Object.assign({ id }, o)); });
+  w.onerror = (e) => fail(e.message || 'AI 載入失敗（Worker 錯誤）');
+  // 6.2.1：Worker 被系統收掉時可能什麼都不回，每個工作最多等 90 秒（Y31 單條框選兩次約 10 秒）
+  const post = (o) => new Promise((res, rej) => {
+    const id = ++seq, t = setTimeout(() => { pend.delete(id); rej(new Error('超過 90 秒沒有回應')); }, 90000);
+    pend.set(id, { res: (v) => { clearTimeout(t); res(v); }, rej: (er) => { clearTimeout(t); rej(er); } });
+    w.postMessage(Object.assign({ id }, o));
+  });
   return { post, end: () => { fail('結束'); w.terminate(); } };
 }
+const napMs = (ms) => new Promise((r) => setTimeout(r, ms));
+/* 6.2.1：作者實測 iPhone、iPad mini 7 會在一半（5／7）失敗，Y31 都成功 → 推測 iOS 連續開好幾個多執行緒 AI 引擎時記憶體不夠。改成：
+   換 Worker 前停 0.5 秒；一種條數失敗就停 1 秒重試一次，還是失敗就跳過（用測到的選）；GPU 改到最後、自己一個 Worker；
+   失敗原因記在隱藏診斷區（aiNote）。連 1 條都測不到才算沒有完成 */
 async function aiOptimize() {
   if (aiOptRunning || !(await aiOptCan())) return false;
   aiOptRunning = true;
   const hc = navigator.hardwareConcurrency || 4, hasTeed = await aiHas([TEED_FILE]);
   const list = [1, 2, 4].filter((n) => n === 1 || n <= hc), gpuTry = !!navigator.gpu && !settings.aiSafeCPU;
-  const total = list.length * (hasTeed ? 2 : 1) + (gpuTry ? 1 : 0);
+  const per = hasTeed ? 2 : 1, total = list.length * per + (gpuTry ? 1 : 0);
   let done = 0, w = null;
-  const step = () => busyProg(`最佳化 AI 效能中…（${done + 1}／${total}）\n請不要離開這個畫面`, done / total);
-  const R = { u2: {}, td: {}, gpu: null };
+  const step = () => busyProg(`最佳化 AI 效能中…（${Math.min(total, done + 1)}／${total}）\n請不要離開這個畫面`, done / total);
+  const R = { u2: {}, td: {}, gpu: null }, errs = [];
+  const err = (e) => String((e && e.message) || e).slice(0, 60);
+  // 一種條數：u2＋TEED 都成功才算（各條數要能互相比較）；回傳 'ok'／'noiso'／'fail'
+  const cfg = async (n) => {
+    for (let k = 1; k <= 2; k++) {
+      const d0 = done;
+      try {
+        await napMs(k === 1 ? 500 : 1000);
+        w = optWorker(n);
+        const r0 = await w.post({ type: 'init', engine: 'new', ep: 'wasm', threads: n });
+        if (n > 1 && r0.threads !== n) { w.end(); w = null; return 'noiso'; } // 這個 Worker 沒有隔離：多條測不了
+        step(); const u = await w.post({ type: 'optRun', model: 'u2', ep: 'wasm' }); done++;
+        let t = null; if (hasTeed) { step(); t = await w.post({ type: 'optRun', model: 'teed', ep: 'wasm' }); done++; }
+        w.end(); w = null;
+        R.u2[n] = u; if (t != null) R.td[n] = t;
+        return 'ok';
+      } catch (e) {
+        if (w) { w.end(); w = null; }
+        done = d0; errs.push(`${n} 條第 ${k} 次：${err(e)}`);
+      }
+    }
+    done += per; return 'fail';
+  };
   try {
     if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset(); // 原本的 AI 引擎先關掉，把記憶體與 CPU 留給測速
-    for (const n of list) {
-      w = optWorker(n);
-      const r0 = await w.post({ type: 'init', engine: 'new', ep: 'wasm', threads: n });
-      if (n > 1 && r0.threads !== n) { w.end(); w = null; break; } // 這個 Worker 沒有隔離：多條測不了
-      step(); R.u2[n] = await w.post({ type: 'optRun', model: 'u2', ep: 'wasm' }); done++;
-      if (hasTeed) { step(); R.td[n] = await w.post({ type: 'optRun', model: 'teed', ep: 'wasm' }); done++; }
-      if (n === 1 && gpuTry) { step(); R.gpu = await w.post({ type: 'optRun', model: 'u2', ep: 'webgpu' }); done++; }
-      w.end(); w = null;
+    for (const n of list) { const r = await cfg(n); if (r === 'noiso') { done = list.length * per; break; } }
+    if (gpuTry) { // GPU 最後測、自己一個 Worker；用不了（null）或出錯都當作沒有 GPU
+      try { await napMs(500); w = optWorker(1); await w.post({ type: 'init', engine: 'new', ep: 'webgpu', threads: 1 }); step(); R.gpu = await w.post({ type: 'optRun', model: 'u2', ep: 'webgpu' }); }
+      catch (e) { R.gpu = null; errs.push('GPU：' + err(e)); }
+      if (w) { w.end(); w = null; } done++;
     }
+    for (const t of errs) aiNote('最佳化失敗 ' + t);
+    if (!Object.keys(R.u2).length) throw new Error('每種條數都失敗'); // 連 1 條都測不到才算沒有完成
     busyProg('最佳化 AI 效能中…', 1);
     const ns = Object.keys(R.u2).map(Number);
     const cpuBest = Math.min(...ns.map((n) => R.u2[n]));
@@ -5362,6 +5392,7 @@ async function aiOptimize() {
     return true;
   } catch (e) {
     if (w) w.end();
+    if (!errs.length) aiNote('最佳化沒有完成：' + err(e));
     unbusy(); aiOptRunning = false; console.warn('AI opt', e);
     toast('最佳化沒有完成，可以在設定的 AI 那欄再試一次');
     return false;
@@ -5833,7 +5864,7 @@ const CHANGELOG = [
     { t: '即時掃描也支援雙頁模式', since: '6.1' },
     { t: '翻頁加上翻書動畫', since: '6.1' },
     { t: '手機橫放時可一次顯示兩頁，並可設定左頁及右頁顯示', since: '6.1.2' },
-    { t: '導入CPU多核心，最佳化提升AI框選性能（設定中可重新最佳化）', since: '6.2' },
+    { t: '導入CPU多核心，最佳化提升AI框選性能（設定中可重新最佳化）。重新開啟 App 後可進行最佳化', since: '6.2' },
   ] },
 ];
 const LOG_KEY = 'cocoscan-log-seen'; // 看過日誌時的 App 版號
