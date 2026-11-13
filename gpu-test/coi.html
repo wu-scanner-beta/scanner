@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>多核心測速</title>
+<style>
+:root{--bg:#F6EFE6;--fg:#2A1F18;--card:#FFFCF8;--ac:#7A4A2A;--ok:#2E7D4F;--ng:#B23A2A;--line:#E3D6C6}
+@media (prefers-color-scheme:dark){:root{--bg:#1C130E;--fg:#F3E9DD;--card:#2A1F18;--ac:#E0A872;--ok:#6CC08F;--ng:#F08A7A;--line:#4A3A2E}}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,"PingFang TC","Noto Sans TC",sans-serif}
+main{max-width:640px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:4px 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 0}
+.ok{color:var(--ok);font-weight:600}.ng{color:var(--ng);font-weight:600}
+button{font:inherit;background:var(--ac);color:var(--bg);border:0;border-radius:10px;padding:10px 18px;font-weight:600}
+button:disabled{opacity:.5}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums;font-size:14px}
+th,td{padding:6px 4px;border-bottom:1px solid var(--line);text-align:right}
+th:first-child,td:first-child{text-align:left}
+#log{font:12px/1.4 ui-monospace,monospace;white-space:pre-wrap;max-height:180px;overflow:auto;opacity:.75}
+small{opacity:.7}
+</style>
+</head>
+<body><main>
+<h1>多核心測速（6.2 測試）</h1>
+<div class="card" id="env">檢查中…</div>
+<div class="card">
+  <button id="go" disabled>開始測速</button>
+  <small>　約 1～3 分鐘，測的時候請不要切換 App</small>
+</div>
+<div class="card"><table id="tb"><thead><tr><th>執行緒</th><th>AI 框選</th><th>TEED</th><th>結果一致</th></tr></thead><tbody></tbody></table>
+<small>時間是第 2 次以後的平均；倍數跟 1 條比。「結果一致」＝跟 1 條的輸出最大差異。</small></div>
+<div class="card"><div id="log"></div></div>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const log = (m) => {  const l = $('#log'); l.textContent += m + '\n'; l.scrollTop = l.scrollHeight; };
+(async () => {
+  // 第一次打開還沒有 Service Worker 接手：註冊後重新整理一次
+  if ('serviceWorker' in navigator && !navigator.serviceWorker.controller) {
+    try {
+      await navigator.serviceWorker.register('./coi-sw.js', { scope: './' });
+      await navigator.serviceWorker.ready;
+      if (!sessionStorage.getItem('coiReload')) { sessionStorage.setItem('coiReload', '1'); location.reload(); return; }
+    } catch (e) { log('Service Worker 註冊失敗：' + e.message); }
+  }
+  const iso = self.crossOriginIsolated === true, sab = typeof SharedArrayBuffer !== 'undefined', hc = navigator.hardwareConcurrency || '?';
+  $('#env').innerHTML = `跨來源隔離：<span class="${iso ? 'ok' : 'ng'}">${iso ? '成功' : '沒有開成'}</span><br>共用記憶體：<span class="${sab ? 'ok' : 'ng'}">${sab ? '可用' : '不可用'}</span><br>核心數：${hc}<br><small>${navigator.userAgent}</small>`;
+  $('#go').disabled = false;
+  $('#go').onclick = () => run(iso, hc);
+})();
+
+async function inputs() {
+  const img = new Image(); img.src = 'sample.jpg'; await img.decode();
+  const px = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d'); g.drawImage(img, 0, 0, w, h); return g.getImageData(0, 0, w, h).data; };
+  const N = 320 * 320, a = px(320, 320); let mx = 1;
+  for (let i = 0; i < a.length; i += 4) mx = Math.max(mx, a[i], a[i + 1], a[i + 2]);
+  const M = [0.485, 0.456, 0.406], S = [0.229, 0.224, 0.225], u2 = new Float32Array(3 * N);
+  for (let i = 0; i < N; i++) for (let c = 0; c < 3; c++) u2[c * N + i] = (a[i * 4 + c] / mx - M[c]) / S[c];
+  const landscape = img.width > img.height, tw = landscape ? 640 : 480, th = landscape ? 480 : 640, n = tw * th, b = px(tw, th), td = new Float32Array(3 * n);
+  for (let i = 0; i < n; i++) { td[i] = b[i * 4 + 2] - 103.939; td[n + i] = b[i * 4 + 1] - 116.779; td[2 * n + i] = b[i * 4] - 123.68; }
+  return { u2, td, tw, th };
+}
+function once(threads, inp) {
+  return new Promise((ok, ng) => {
+    const w = new Worker('coi-bench.js');
+    w.onmessage = (e) => { const d = e.data; if (d.type === 'log') log(d.msg); else { w.terminate(); d.type === 'done' ? ok(d.res) : ng(new Error(d.msg)); } };
+    w.onerror = (e) => { w.terminate(); ng(new Error(e.message || 'Worker 錯誤')); };
+    w.postMessage({ threads, u2: inp.u2, td: inp.td, tw: inp.tw, th: inp.th });
+  });
+}
+const maxDiff = (a, b) => { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; };
+async function run(iso, hc) {
+  $('#go').disabled = true; $('#tb tbody').innerHTML = ''; $('#log').textContent = '';
+  const inp = await inputs();
+  const list = iso ? [1, 2, 3, 4, 6, 8].filter((t) => t === 1 || t <= hc) : [1];
+  if (!iso) log('沒有跨來源隔離，只能測 1 條');
+  let base = null;
+  for (const t of list) {
+    try {
+      const r = await once(t, inp);
+      if (!base) base = r;
+      const f = (k) => `${Math.round(r[k + 'Avg'])} ms<br><small>×${(base[k + 'Avg'] / r[k + 'Avg']).toFixed(2)}</small>`;
+      const d = Math.max(maxDiff(r.u2Out, base.u2Out), maxDiff(r.tdOut, base.tdOut));
+      $('#tb tbody').insertAdjacentHTML('beforeend', `<tr><td>${t} 條</td><td>${f('u2')}</td><td>${f('td')}</td><td>${d < 1e-3 ? '<span class="ok">一致</span>' : d.toExponential(1)}</td></tr>`);
+    } catch (e) { $('#tb tbody').insertAdjacentHTML('beforeend', `<tr><td>${t} 條</td><td colspan="3" class="ng">${e.message}</td></tr>`); }
+  }
+  log('完成'); $('#go').disabled = false;
+}
+</script>
+</body>
+</html>
