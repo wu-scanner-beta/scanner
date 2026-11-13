@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.2.3'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2.4'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -5306,7 +5306,8 @@ function aiCrashCheck() {
 function aiIosAdvice() {
   if (!AI_IOS_DEV) return '';
   if (AI_IOS_VER == null) return '建議升級到 iOS 27 後會自動恢復較快的速度。';
-  if (AI_IOS_VER <= 26) return `你的 ${AI_IOS_DEV} 是 iOS ${AI_IOS_FULL}，AI 使用較穩定的 CPU 模式；升級到 iOS 27 後會自動恢復較快的速度。`;
+  // 6.2.4：只寫大版本（作者 iOS 26.7.1 的手機 UA 是 Version/26.6.2：那是 Safari 的版本，小版本不一定跟 iOS 同步；隱藏區仍顯示完整的）
+  if (AI_IOS_VER <= 26) return `你的 ${AI_IOS_DEV} 是 iOS ${AI_IOS_VER}，AI 使用較穩定的 CPU 模式；升級到 iOS 27 後會自動恢復較快的速度。`;
   return '';
 }
 let aiCrashTold = false;
