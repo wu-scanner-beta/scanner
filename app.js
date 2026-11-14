@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.2.5'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2.6'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -1159,7 +1159,7 @@ async function startLive(docId) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
   }
   Object.assign(live, {
-    running: true, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
+    running: true, st: { t0: performance.now(), last: 0, act: 0, det: 0, detMs: 0, hit: 0, teed: 0, teedMs: 0 }, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
     aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false, camOff: false,
     seenT: performance.now(), idleT0: performance.now(), tipOn: false, // 4.1.7
@@ -1348,7 +1348,17 @@ function camResume() {
   live.camOff = false;
   try { if (live.track) live.track.enabled = true; } catch (_) {}
 }
+/* 6.2.6：即時掃描統計（隱藏區的 AI 紀錄）：作者 Y31 開 2 條後即時框選變少、大多倒數才拍，想比較多條／單條。
+   每次離開即時掃描記一行：秒數、偵測次數（每秒幾次、平均毫秒、有框的比例）、TEED 次數與平均毫秒、AI 條數 */
+function liveStatNote() {
+  const st = live.st; live.st = null;
+  if (!st) return;
+  const sec = st.act / 1000; // 有在找框的秒數（拍照、倒數、暫停不算）
+  if (sec < 3) return;
+  aiNote(`即時統計 找框 ${Math.round(sec)} 秒：偵測 ${st.det} 次（每秒 ${(st.det / sec).toFixed(1)}，平均 ${st.det ? Math.round(st.detMs / st.det) : '-'} 毫秒，有框 ${st.det ? Math.round((st.hit / st.det) * 100) : 0}%）、TEED ${st.teed} 次（平均 ${st.teed ? Math.round(st.teedMs / st.teed) : '-'} 毫秒）、AI ${aiThreadsUsed} 條${settings.aiForce1 ? '（強制單核心）' : ''}${settings.spread ? '、雙頁' : ''}`);
+}
 function stopLive() {
+  liveStatNote();
   live.running = false; live.camOff = false; live.tipOn = false; tipSync();
   if (live.teedOK) aiReleaseSoon(); // 4.3：即時 TEED 用過，離開後釋放 AI 引擎
   clearTimeout(camTipT); $('#camTip').classList.remove('show');
@@ -1567,7 +1577,9 @@ async function teedLiveRun(v) {
   x.drawImage(v, 0, 0, W, H);
   const d = x.getImageData(0, 0, W, H);
   const sharp = sharpness(d), gt = grayThumb(d);
+  const t0t = performance.now();
   const buf = await aiCall({ type: 'teed', buffer: d.data.buffer, width: W, height: H }, [d.data.buffer]);
+  if (live.st) { live.st.teed++; live.st.teedMs += performance.now() - t0t; } // 6.2.6 統計
   if (!teedWanted(performance.now())) return;
   let r;
   if (settings.spread) { // 6.1 雙頁：TEED（＋自動 AI 框選開著時的 AI 遮罩）找整本書的外框與書溝（作者影片 9766：書溝很深、背景淺，原本的偵測只框到一頁）
@@ -1642,6 +1654,7 @@ function cdTick(v) {
 async function liveLoop() {
   if (!live.running) return;
   const v = $('#video');
+  if (live.st) { const now = performance.now(); if (!live.paused && !live.capturing && !live.cd && live.st.last) live.st.act += Math.min(500, now - live.st.last); live.st.last = now; } // 6.2.6：只算有在找框的時間
   // 手動模式不找框（1.19）；提示語只顯示 3 秒（1.20，作者覺得一直掛著礙眼）
   if (!settings.autoShutter && !live.paused && !live.capturing) { if (performance.now() < (live.manualHintUntil || 0)) setHint(MANUAL_HINT); else hideHint(); }
   if (workerReady && settings.autoShutter && !live.paused && !live.capturing && v.videoWidth && !live.cd) teedTick(v); // 4.3；5.1.1 倒數中不跑
@@ -1661,7 +1674,9 @@ async function liveLoop() {
       const sharp = sharpness(d);
       const gt = grayThumb(d);
       const luma = meanLuma(d); // 要在 buffer 交給 worker 之前算
+      const t0d = performance.now();
       const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height, fast: true, spread: !!settings.spread }, [d.data.buffer]); // 6.1 雙頁：要整本
+      if (live.st) { live.st.det++; live.st.detMs += performance.now() - t0d; if (r && r.corners) live.st.hit++; } // 6.2.6 統計
       onDetect(r, sig, full, sharp, gt);
       if (settings.spread) spreadGutterTick(v); // 6.1：鎖到整本時找書溝
       darkCheck(luma);
@@ -4961,7 +4976,7 @@ $('#btnSettings').onclick = () => {
     <div class="note">所有掃描只存在這支手機的瀏覽器裡，不會上傳。<br>即時掃描的畫質見上方「即時掃描畫質」：iPhone 最高約 1200 萬畫素（網頁相機的上限），Android 最高 1600 萬畫素。要最清楚的畫質請用「高畫質拍照」。</div>
     <div class="note" id="storeInfo"></div>
     <div class="switch" id="teedMarkRow" style="${settings.teedMarkShown ? '' : 'display:none'}"><span>顯示 TEED 協助標記<small>測試用：即時掃描 TEED 找到的框改成淡藍色；AI 框選時提示 TEED 換了哪幾條邊</small></span><button class="tg ${settings.teedMark ? 'on' : ''}" data-k="teedMark"></button></div>
-    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速（精修與框選）</span></button><button class="srow" id="aiUnsafe" style="${settings.aiSafeCPU || settings.aiCrashN || settings.aiMtSafe || settings.aiMtCrashN || settings.aiMtOffVer === APP_VER ? '' : 'display:none'}"><span>解除框選閃退保護</span></button></div>
+    <div class="note" id="srInfo" style="font-size:12px;${settings.teedMarkShown ? '' : 'display:none'}"><div id="srInfoTx">${srInfoText()}</div><button class="srow" id="srRebench" style="margin-top:6px"><span>重新測速（精修與框選）</span></button><button class="srow" id="aiUnsafe" style="${settings.aiSafeCPU || settings.aiCrashN || settings.aiMtSafe || settings.aiMtCrashN || settings.aiMtOffVer === APP_VER ? '' : 'display:none'}"><span>解除框選閃退保護</span></button><button class="srow" id="aiForce1" style="margin-top:2px"><span id="aiForce1Tx">AI 強制單核心（測試用）：${settings.aiForce1 ? '開' : '關'}</span></button></div>
     <div class="note" id="setVer" style="font-size:11px;opacity:.7">${viewportInfo()}・v${APP_VER}</div>`, (s) => {
     // 5.0：隱藏區（TEED 協助標記開關、AI 診斷）。5.1.9 起入口改在更新日誌的「目前版本」連點 5 下（logCurrent），這裡不再能點
     s.querySelector('#srRebench').onclick = async () => { // 5.1.7：隱藏區手動重測；5.1.9 精修與框選一起
@@ -4970,6 +4985,13 @@ $('#btnSettings').onclick = () => {
         settings.aiBenchV = null; settings.aiBenchN = 0; aiBenchedNow = false; saveSettings();
         await srBenchNow(true); await aiInit(); await aiBench();
       } catch (e) { toast('測速失敗：' + (e && e.message ? e.message : e)); }
+      const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
+    };
+    s.querySelector('#aiForce1').onclick = () => { // 6.2.6：作者在 Y31 比較即時框選用（多條 vs 單條）
+      settings.aiForce1 = !settings.aiForce1; saveSettings();
+      aiNote(`AI 強制單核心：${settings.aiForce1 ? '開' : '關'}`);
+      if (!aiPending.size && !aiBatchOn && !srProg.size) aiReset(); // 下次用 AI 時照新的條數建立
+      s.querySelector('#aiForce1Tx').textContent = `AI 強制單核心（測試用）：${settings.aiForce1 ? '開' : '關'}`;
       const t = s.querySelector('#srInfoTx'); if (t) t.innerHTML = srInfoText();
     };
     s.querySelector('#aiUnsafe').onclick = () => { // 5.1.9：手動解除框選閃退保護
@@ -5389,7 +5411,7 @@ const aiIso = () => self.crossOriginIsolated === true;
 const AI_OPT_KEY = 'cocoscan-aiopt', AI_MT_KEY = 'cocoscan-aimt';
 let aiMtSafeNow = false, aiMtJobs = 0;
 const aiMtOk = () => !aiOldIOS && !aiMtSafeNow && !settings.aiMtSafe;
-function aiThreadsNow() { return aiIso() && aiMtOk() && settings.aiOptV === AI_OPT_V && settings.aiThreads > 1 ? settings.aiThreads : 1; }
+function aiThreadsNow() { return aiIso() && aiMtOk() && !settings.aiForce1 && settings.aiOptV === AI_OPT_V && settings.aiThreads > 1 ? settings.aiThreads : 1; }
 async function aiOptCan() { if (!aiIso() || aiOldNow || aiOldIOS || settings.aiMtOffVer === APP_VER || settings.aiMtSafe || aiMtSafeNow) return false; const st = await aiState(); return !!(st.model && st.neu); }
 function aiMtMark(d) {
   aiMtJobs = Math.max(0, aiMtJobs + d);
@@ -5785,7 +5807,7 @@ const esc = (t) => String(t).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt
 function srInfoText() {
   const b = settings.srBench, L = settings.srLast, out = [];
   out.push(`AI 引擎：${aiEngineNow ? (aiEngineNow === 'new' ? '新引擎' : '舊引擎（相容模式）') + `，框選用 ${aiEPNow === 'webgpu' ? 'GPU' : 'CPU'}，CPU ${aiThreadsUsed} 條` : aiOldNow ? '這次用相容模式（尚未載入）' : '尚未載入'}`);
-  out.push(`多核心：${aiIso() ? '已隔離' : '未隔離（單核心）'}・核心 ${navigator.hardwareConcurrency || '?'}・${aiOldIOS ? `iOS ${AI_IOS_FULL} 不提供` : settings.aiMtOffVer === APP_VER ? '最佳化時中斷過，這個版本不提供' : settings.aiMtSafe ? '閃退保護，這個版本一律單核心' : aiMtSafeNow ? '閃退保護，這次先用單核心' : settings.aiOptV === AI_OPT_V ? `已最佳化 ${settings.aiThreads || 1} 條` : '尚未最佳化'}${settings.aiMtCrashN ? `（中斷 ${settings.aiMtCrashN} 次）` : ''}`); // 6.2／6.2.3
+  out.push(`多核心：${aiIso() ? '已隔離' : '未隔離（單核心）'}・核心 ${navigator.hardwareConcurrency || '?'}・${aiOldIOS ? `iOS ${AI_IOS_FULL} 不提供` : settings.aiMtOffVer === APP_VER ? '最佳化時中斷過，這個版本不提供' : settings.aiMtSafe ? '閃退保護，這個版本一律單核心' : aiMtSafeNow ? '閃退保護，這次先用單核心' : settings.aiOptV === AI_OPT_V ? `已最佳化 ${settings.aiThreads || 1} 條` : '尚未最佳化'}${settings.aiMtCrashN ? `（中斷 ${settings.aiMtCrashN} 次）` : ''}${settings.aiForce1 ? '・強制單核心（測試用）' : ''}`); // 6.2／6.2.3／6.2.6
   const ab = settings.aiBenchR, abN = settings.aiBenchN || 1;
   out.push(`框選：${aiGpuOk() ? (settings.aiEP === 'webgpu' ? 'GPU' : 'CPU') : aiGpuWhy()}${settings.aiCrashN ? `（中斷 ${settings.aiCrashN} 次）` : ''}` +
     (ab ? `（比較 CPU ${ab.cpu}、${ab.gpu != null ? 'GPU ' + ab.gpu : 'GPU 無法使用'}${settings.aiEP !== 'webgpu' && !settings.aiSafeCPU ? `；第 ${abN} 次，${abN >= AI_RETRY ? '已定案' : '下次打開再比'}` : ''}）` : ''));
