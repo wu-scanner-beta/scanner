@@ -1,6 +1,6 @@
 /* 伍線譜樂譜掃描 — 主程式（內部資料名稱 cocoscan 維持不變，避免舊資料遺失） */
 'use strict';
-const APP_VER = '6.2.6'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
+const APP_VER = '6.2.7'; // 完整版號，每次打包都要改（說明見「版本、更新日誌」那段）
 const $ = (s) => document.querySelector(s);
 const FULL = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const MODES = [
@@ -1159,7 +1159,7 @@ async function startLive(docId) {
     toast('此瀏覽器不支援即時相機，請改用「高畫質拍照」'); return;
   }
   Object.assign(live, {
-    running: true, st: { t0: performance.now(), last: 0, act: 0, det: 0, detMs: 0, hit: 0, teed: 0, teedMs: 0 }, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
+    running: true, detTs: [], st: { t0: performance.now(), last: 0, act: 0, det: 0, detMs: 0, hit: 0, teed: 0, teedMs: 0 }, docId, fromDoc: !!docId, count: 0, stream: null, track: null, ic: null, lastQuad: null, shown: null,
     hist: [], miss: 0, armed: true, capturedQuad: null, capturedSig: null, capturing: false, detecting: false, lastCapT: 0, progress: 0, paused: false,
     aiLater: [], lastRes: null, lastPageId: null, deferring: false, deferDone: null, finishing: false, camOff: false,
     seenT: performance.now(), idleT0: performance.now(), tipOn: false, // 4.1.7
@@ -1360,7 +1360,9 @@ function liveStatNote() {
 function stopLive() {
   liveStatNote();
   live.running = false; live.camOff = false; live.tipOn = false; tipSync();
-  if (live.teedOK) aiReleaseSoon(); // 4.3：即時 TEED 用過，離開後釋放 AI 引擎
+  // 4.3：即時 TEED 用過，離開後釋放 AI 引擎。6.2.7：Android 閒置 60 秒才釋放（作者 Y31 每次進即時掃描都要重載十幾秒，搶 CPU 讓框出不來）；
+  // iPhone／iPad 照舊 3 秒（作者：iPhone 不要動，記憶體吃緊、載入也快）
+  if (live.teedOK) aiReleaseSoon(/Android/i.test(navigator.userAgent) && !AI_IOS_DEV ? 60000 : 3000);
   clearTimeout(camTipT); $('#camTip').classList.remove('show');
   if (live.stream) live.stream.getTracks().forEach((t) => t.stop());
   live.stream = null;
@@ -1481,6 +1483,11 @@ function freeFullCanvases() { live.best = null; for (const c of fullCanvases) c.
    - TEED 鎖到後，這一頁由 TEED 負責到拍完、換頁為止（teedOwns：原本的偵測不參與、也不跑）
    - 連續跑 20 秒沒結果就先停（控制發熱），畫面明顯改變（frameSig 差 > 18）才再開始；只有下載過 AI 資料（有 TEED）的手機才有 */
 const TEED_AFTER = 1000, TEED_CAP = 20000; // 5.1.4：2 → 1 秒，讓 TEED 在倒數（2 秒）開始前有機會先試
+/* 6.2.7：慢手機（作者 Y31：偵測每秒只有 1.9 次、有框 86%，但大多倒數才拍；關掉倒數框就會出現）——倒數與 TEED 都改成「時間到」之外，
+   還要「一般偵測已經試過幾次」：iPhone 每秒十幾次不到 1 秒就試滿，等於沒變；Y31 自動多等，讓框先鎖定、也不會太早叫 TEED 載入引擎搶 CPU。
+   偵測一直沒跑（例如 OpenCV 還沒載好）時，6 秒／4 秒後照舊 */
+const CD_MIN_DET = 8, TEED_MIN_DET = 3, CD_DET_MAX_WAIT = 6000, TEED_DET_MAX_WAIT = 4000;
+function detSince(t) { const a = live.detTs || []; let n = 0; for (let i = a.length - 1; i >= 0 && a[i] >= t; i--) n++; return n; }
 function teedOwns() { return !!live.teedOK && (live.armed ? live.lockSrc === 'teed' : live.capSrc === 'teed'); }
 /* 5.3：原本的偵測鎖到的框碰到畫面邊緣（任一角離邊 2% 內）＝可疑，先不拍，請 TEED 確認一次（作者：布面、桌紋等有紋路的背景，
    紙的一條邊被紋路連到畫面外；周報實拍：原本的偵測底邊在 0.99，TEED／AI 都在 0.86）。
@@ -1545,7 +1552,11 @@ function drawSpreadLine(ctx, R, q, a, color) {
 }
 function teedWanted(now) {
   if (!live.teedOK || !live.running || !settings.autoShutter || live.paused || live.capturing || live.cd) return false;
-  if (live.armed) return live.lockQ ? live.lockSrc === 'teed' || susPending(now) : now - Math.max(live.idleT0 || now, live.seenT || 0) > TEED_AFTER;
+  if (live.armed) {
+    if (live.lockQ) return live.lockSrc === 'teed' || susPending(now);
+    const ref = Math.max(live.idleT0 || now, live.seenT || 0);
+    return now - ref > TEED_AFTER && (detSince(ref) >= TEED_MIN_DET || now - ref > TEED_DET_MAX_WAIT); // 6.2.7
+  }
   return live.capSrc === 'teed';
 }
 function teedRearm() { live.capSrc = null; live.tT0 = null; live.tCapped = false; live.tCand = []; }
@@ -1634,11 +1645,13 @@ function cdTick(v) {
     // 5.2.2：畫面上有框、但從這一頁開始找起 3 秒還拍不下來（作者：通常是錯的框，例如一角頂到邊緣，框忽隱忽現或一直抖，
     //   以前「有框」就永遠不倒數，只能一直舉著）也可以倒數；聚焦圓環已經轉超過三成（快拍下了）先讓它拍，但被「拉遠一點」擋住的不算
     const lockedLong = live.lockQ && now - (live.idleT0 || now) > CD_STUCK && (live.edge || (live.progress || 0) < 0.3)
+      && (detSince(live.idleT0 || now) >= CD_MIN_DET || now - (live.idleT0 || now) > CD_DET_MAX_WAIT) // 6.2.7：慢手機有框但聚焦圈還沒轉完，也等偵測試滿 8 次
       && !(live.lockSrc === 'teed' && now - (live.tLockT || 0) < CD_STUCK); // 5.3：TEED 剛鎖到（或剛換成 TEED 的框）給它 3 秒自己拍完（TEED 一秒只有 1～2 格）
     // 5.1.4：從「這一頁開始找」或「上一次真正鎖穩（聚焦過半）」算 2 秒；一閃而過的鎖定（原本的偵測或 TEED）不延後倒數
     // 6.1 雙頁：有 TEED 時多等 2 秒才倒數，讓 TEED／AI 有機會先找到整本（作者影片 9766：倒數在 TEED 開始找之前就把畫面整張拍走）
     const cdAfter = settings.spread && live.teedOK ? CD_AFTER + 2000 : CD_AFTER;
-    const want = live.armed && (stuck || lockedLong || (!live.lockQ && now - Math.max(live.idleT0 || now, live.cdBase || 0) > cdAfter));
+    const cdRef = Math.max(live.idleT0 || now, live.cdBase || 0);
+    const want = live.armed && (stuck || lockedLong || (!live.lockQ && now - cdRef > cdAfter && (detSince(cdRef) >= CD_MIN_DET || now - cdRef > CD_DET_MAX_WAIT))); // 6.2.7：偵測至少試過 8 次
     live.cdWait = want && !still; // 等使用者拿穩：提示「拿穩後開始倒數」
     if (!want || !still) return;
     live.cdWait = false; live.cdHist = [];
@@ -1677,6 +1690,7 @@ async function liveLoop() {
       const t0d = performance.now();
       const r = await wcall('detect', { buffer: d.data.buffer, width: d.width, height: d.height, fast: true, spread: !!settings.spread }, [d.data.buffer]); // 6.1 雙頁：要整本
       if (live.st) { live.st.det++; live.st.detMs += performance.now() - t0d; if (r && r.corners) live.st.hit++; } // 6.2.6 統計
+      (live.detTs = live.detTs || []).push(performance.now()); if (live.detTs.length > 40) live.detTs.shift(); // 6.2.7
       onDetect(r, sig, full, sharp, gt);
       if (settings.spread) spreadGutterTick(v); // 6.1：鎖到整本時找書溝
       darkCheck(luma);
@@ -2384,7 +2398,13 @@ $('#cdBtn').onclick = () => {
 };
 // 5.1：倒數中點相機畫面取消，這一頁不再倒數，畫面明顯改變後才重新開始
 $('#live .stage').addEventListener('click', (e) => {
-  if (!live.cd || e.target.closest('button,.pill,#liveTip,#camTip')) return;
+  if (e.target.closest('button,.pill,#liveTip,#camTip')) return;
+  // 6.2.7：拍完提示「請換下一頁」時點畫面＝已經換好了，馬上繼續找框（作者：有時其實已經換了，App 還沒發現）
+  if (!live.cd && live.running && !live.armed && settings.autoShutter && !live.capturing && !live.paused) {
+    live.armed = true; live.chgHits = 0; live.miss = 0; resetLock(); setRing(0); live.idleT0 = performance.now(); teedRearm();
+    setHint('將文件放進畫面中'); toast('繼續拍攝'); return;
+  }
+  if (!live.cd) return;
   cdStop(); live.cdBlock = frameSig($('#video'));
   toast('已取消倒數，翻頁或換紙後會重新開始');
 });
@@ -5289,13 +5309,14 @@ function aiReset() {
 let aiLastUse = 0, aiRelT = 0, aiBatchOn = false;
 // 4.2.3：沒有工作在跑就馬上釋放，有的話等閒置再釋放
 function aiReleaseNow() { if (aiWorker && !aiPending.size && !aiBatchOn && !srProg.size) aiReset(); else aiReleaseSoon(); }
-function aiReleaseSoon() {
+function aiReleaseSoon(ms) {
   clearTimeout(aiRelT);
+  const wait = ms || 3000;
   aiRelT = setTimeout(() => {
     if (!aiWorker) return;
-    if (aiPending.size || aiBatchOn || srProg.size || performance.now() - aiLastUse < 2500) { aiReleaseSoon(); return; }
+    if (aiPending.size || aiBatchOn || srProg.size || performance.now() - aiLastUse < 2500) { aiReleaseSoon(ms); return; }
     aiReset();
-  }, 3000);
+  }, wait);
 }
 // 4.2.1 閃退保護：批次框選開始時記下、結束清掉；下次打開還在＝上次框到一半閃退 → AI 框選改用 CPU（較省記憶體）並提示
 const AI_BATCH_KEY = 'cocoscan-aibatch';
